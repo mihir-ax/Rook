@@ -1,11 +1,13 @@
 import os
 import uuid
+import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from groq import AsyncGroq
+from aiohttp import web  # Web server ke liye import
 
 # Load Environment Variables
 load_dotenv()
@@ -29,6 +31,10 @@ async def is_admin(_, __, message):
     return message.from_user and message.from_user.id == ADMIN_ID
 
 admin_only = filters.create(is_admin)
+
+# --- Web Server (Render & Pinger ko khush karne ke liye) ---
+async def health_check(request):
+    return web.Response(text="Groq AI Bot is ALIVE and running! 🚀")
 
 # --- Helper Functions ---
 
@@ -65,9 +71,9 @@ async def start_cmd(client, message):
         "`/set_api <api_key>` - Set apna Groq API\n"
         "`/set_model <model_id>` - Set Model (default: llama3-8b-8192)\n\n"
         "**Chat Commands:**\n"
-        "/newchat - Start fresh chat\n"
-        "/showchat - Manage chats (Select/Delete)\n"
-        "/system_prompt <text> - Set system prompt for current chat\n"
+        "`/newchat` - Start fresh chat\n"
+        "`/showchat` - Manage chats (Select/Delete)\n"
+        "`/system_prompt <text>` - Set system prompt for current chat\n"
         "`/renamechat <name>` - Active chat ka naam change karein\n"
         "`/system_prompt delete` - Remove system prompt\n"
     )
@@ -98,24 +104,19 @@ async def new_chat(client, message):
 
 @app.on_message(filters.command("renamechat") & admin_only)
 async def rename_chat(client, message):
-    # User ka data aur active chat nikal lo
     user = await get_user_data(message.from_user.id)
     active_chat = user.get("active_chat")
 
     if not active_chat:
         return await message.reply_text("Bhai koi active chat nahi hai. Pehle `/newchat` kar ya `/showchat` se select kar!")
 
-    # Check karo ki user ne naya naam daala hai ya nahi
     if len(message.command) < 2:
         return await message.reply_text("Bhai naya naam bhi toh daal:\n**Example:** `/renamechat Python Project`")
 
-    # Command ke baad ka poora text as a title le lo
     new_title = message.text.split(" ", 1)[1]
-
-    # MongoDB mein title update kar do
     await chats_col.update_one({"_id": active_chat}, {"$set": {"title": new_title}})
-
     await message.reply_text(f"✅ Active chat ka naam update ho gaya!\nNaya naam: **{new_title}**")
+
 @app.on_message(filters.command("system_prompt") & admin_only)
 async def sys_prompt(client, message):
     user = await get_user_data(message.from_user.id)
@@ -183,7 +184,7 @@ async def handle_chat_buttons(client, callback_query):
 
 # --- Main AI Chat Handler ---
 
-@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "system_prompt"]) & admin_only)
+@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "renamechat", "system_prompt"]) & admin_only)
 async def chat_handler(client, message):
     user = await get_user_data(message.from_user.id)
 
@@ -244,7 +245,33 @@ async def chat_handler(client, message):
         await processing_msg.edit_text(f"❌ **Error aagaya bhai:**\n`{str(e)}`")
 
 
-# Run Bot
+# --- DUAL RUNNER (Telegram + Web Server) ---
+async def main():
+    print("🚀 Starting Bot & Web Server...")
+    
+    # 1. Start Telegram Bot
+    await app.start()
+    print("✅ Telegram Bot is Online!")
+
+    # 2. Start Web Server (Render ke liye + Tere dusre bot ke Pinger ke liye)
+    server = web.Application()
+    server.router.add_get("/", health_check)
+    runner = web.AppRunner(server)
+    await runner.setup()
+    
+    # Render PORT environment variable deta hai, varna 8000 pe run hoga
+    port = int(os.environ.get("PORT", 8000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"🌐 Web Server is running on port {port}!")
+
+    # 3. Idle rakhna taaki script band na ho
+    await idle()
+
+    # 4. Stop properly if script is killed
+    print("🛑 Stopping services...")
+    await app.stop()
+    await runner.cleanup()
+
 if __name__ == "__main__":
-    print("🚀 Bot is starting...")
-    app.run()
+    asyncio.run(main())
