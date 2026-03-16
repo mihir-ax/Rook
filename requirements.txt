@@ -1,5 +1,6 @@
+pyrogram
 tgcrypto
 motor
 groq
 python-dotenv
-pyrogram
+aiohttp
