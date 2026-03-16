@@ -1,0 +1,4 @@
+tgcrypto
+motor
+groq
+python-dotenv

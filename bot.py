@@ -1,0 +1,250 @@
+import os
+import uuid
+from datetime import datetime
+from dotenv import load_dotenv
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from motor.motor_asyncio import AsyncIOMotorClient
+from groq import AsyncGroq
+
+# Load Environment Variables
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+MONGO_URI = os.getenv("MONGO_URI")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# Initialize Pyrogram App
+app = Client("groq_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Initialize MongoDB (Async)
+db_client = AsyncIOMotorClient(MONGO_URI)
+db = db_client["GroqBotDB"]
+users_col = db["users"]
+chats_col = db["chats"]
+
+# Custom Filter for Admin Only
+async def is_admin(_, __, message):
+    return message.from_user and message.from_user.id == ADMIN_ID
+
+admin_only = filters.create(is_admin)
+
+# --- Helper Functions ---
+
+async def get_user_data(user_id):
+    user = await users_col.find_one({"_id": user_id})
+    if not user:
+        user = {"_id": user_id, "groq_api": None, "model_id": "llama3-8b-8192", "active_chat": None}
+        await users_col.insert_one(user)
+    return user
+
+async def create_new_chat(user_id):
+    chat_id = uuid.uuid4().hex
+    chat_data = {
+        "_id": chat_id,
+        "user_id": user_id,
+        "title": f"Chat {datetime.now().strftime('%d-%m %H:%M')}",
+        "system_prompt": None,
+        "history": [],
+        "created_at": datetime.now()
+    }
+    await chats_col.insert_one(chat_data)
+    await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": chat_id}})
+    return chat_id
+
+# --- Commands ---
+
+@app.on_message(filters.command("start") & admin_only)
+async def start_cmd(client, message):
+    await get_user_data(message.from_user.id)
+    text = (
+        "🤖 **Welcome to Groq AI Bot!**\n\n"
+        "Sirf Admin (Aap) mujhe use kar sakte hain.\n\n"
+        "**Setup Commands:**\n"
+        "`/set_api <api_key>` - Set apna Groq API\n"
+        "`/set_model <model_id>` - Set Model (default: llama3-8b-8192)\n\n"
+        "**Chat Commands:**\n"
+        "/newchat - Start fresh chat\n"
+        "/showchat - Manage chats (Select/Delete)\n"
+        "/system_prompt <text> - Set system prompt for current chat\n"
+        "`/renamechat <name>` - Active chat ka naam change karein\n"
+        "`/system_prompt delete` - Remove system prompt\n"
+    )
+    await message.reply_text(text)
+
+@app.on_message(filters.command("set_api") & admin_only)
+async def set_api(client, message):
+    if len(message.command) < 2:
+        return await message.reply_text("Bhai API key bhi toh daal: `/set_api gsk_xxx...`")
+
+    api_key = message.command[1]
+    await users_col.update_one({"_id": message.from_user.id}, {"$set": {"groq_api": api_key}}, upsert=True)
+    await message.reply_text("✅ Groq API Key set ho gayi!")
+
+@app.on_message(filters.command("set_model") & admin_only)
+async def set_model(client, message):
+    if len(message.command) < 2:
+        return await message.reply_text("Bhai Model ID daal: `/set_model llama3-70b-8192`")
+
+    model_id = message.command[1]
+    await users_col.update_one({"_id": message.from_user.id}, {"$set": {"model_id": model_id}}, upsert=True)
+    await message.reply_text(f"✅ Model ID set to: `{model_id}`")
+
+@app.on_message(filters.command("newchat") & admin_only)
+async def new_chat(client, message):
+    chat_id = await create_new_chat(message.from_user.id)
+    await message.reply_text("🆕 **Naya chat start ho gaya!** Ab jo bhejoge fresh context hoga.")
+
+@app.on_message(filters.command("renamechat") & admin_only)
+async def rename_chat(client, message):
+    # User ka data aur active chat nikal lo
+    user = await get_user_data(message.from_user.id)
+    active_chat = user.get("active_chat")
+
+    if not active_chat:
+        return await message.reply_text("Bhai koi active chat nahi hai. Pehle `/newchat` kar ya `/showchat` se select kar!")
+
+    # Check karo ki user ne naya naam daala hai ya nahi
+    if len(message.command) < 2:
+        return await message.reply_text("Bhai naya naam bhi toh daal:\n**Example:** `/renamechat Python Project`")
+
+    # Command ke baad ka poora text as a title le lo
+    new_title = message.text.split(" ", 1)[1]
+
+    # MongoDB mein title update kar do
+    await chats_col.update_one({"_id": active_chat}, {"$set": {"title": new_title}})
+
+    await message.reply_text(f"✅ Active chat ka naam update ho gaya!\nNaya naam: **{new_title}**")
+@app.on_message(filters.command("system_prompt") & admin_only)
+async def sys_prompt(client, message):
+    user = await get_user_data(message.from_user.id)
+    active_chat = user.get("active_chat")
+
+    if not active_chat:
+        return await message.reply_text("Pehle `/newchat` kar bhai!")
+
+    if len(message.command) < 2:
+        chat = await chats_col.find_one({"_id": active_chat})
+        curr_prompt = chat.get("system_prompt", "Koi prompt nahi hai.")
+        return await message.reply_text(f"📝 **Current System Prompt:**\n`{curr_prompt}`")
+
+    prompt_text = message.text.split(" ", 1)[1]
+
+    if prompt_text.lower() == "delete":
+        await chats_col.update_one({"_id": active_chat}, {"$set": {"system_prompt": None}})
+        return await message.reply_text("🗑 System prompt delete kar diya.")
+
+    await chats_col.update_one({"_id": active_chat}, {"$set": {"system_prompt": prompt_text}})
+    await message.reply_text(f"✅ System Prompt set ho gaya:\n`{prompt_text}`")
+
+@app.on_message(filters.command("showchat") & admin_only)
+async def show_chats(client, message):
+    chats = await chats_col.find({"user_id": message.from_user.id}).sort("created_at", -1).to_list(10)
+
+    if not chats:
+        return await message.reply_text("Koi history nahi hai bro.")
+
+    user = await get_user_data(message.from_user.id)
+    active_chat = user.get("active_chat")
+
+    buttons = []
+    for chat in chats:
+        title = chat['title']
+        if chat['_id'] == active_chat:
+            title = f"🟢 {title} (Active)"
+        else:
+            title = f"📁 {title}"
+
+        buttons.append([InlineKeyboardButton(title, callback_data=f"select_{chat['_id']}")])
+        buttons.append([InlineKeyboardButton("❌ Delete", callback_data=f"del_{chat['_id']}")])
+
+    reply_markup = InlineKeyboardMarkup(buttons)
+    await message.reply_text("👇 **Apne chats select ya delete karo:**", reply_markup=reply_markup)
+
+@app.on_callback_query(filters.regex(r"^(select|del)_"))
+async def handle_chat_buttons(client, callback_query):
+    action, chat_id = callback_query.data.split("_")
+    user_id = callback_query.from_user.id
+
+    if action == "select":
+        await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": chat_id}})
+        await callback_query.answer("Chat switch ho gaya!", show_alert=True)
+        await callback_query.message.delete()
+        await client.send_message(user_id, "✅ **Chat Switched!** Purana context wapas load ho gaya.")
+
+    elif action == "del":
+        await chats_col.delete_one({"_id": chat_id})
+        user = await get_user_data(user_id)
+        if user.get("active_chat") == chat_id:
+            await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": None}})
+        await callback_query.answer("Chat Deleted!", show_alert=True)
+        await callback_query.message.delete()
+
+# --- Main AI Chat Handler ---
+
+@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "system_prompt"]) & admin_only)
+async def chat_handler(client, message):
+    user = await get_user_data(message.from_user.id)
+
+    api_key = user.get("groq_api")
+    model_id = user.get("model_id")
+
+    if not api_key:
+        return await message.reply_text("Bhai pehle API key set kar: `/set_api YOUR_KEY`")
+
+    active_chat_id = user.get("active_chat")
+    if not active_chat_id:
+        active_chat_id = await create_new_chat(message.from_user.id)
+
+    # Fetch Chat Context
+    chat_doc = await chats_col.find_one({"_id": active_chat_id})
+    history = chat_doc.get("history", [])
+    system_prompt = chat_doc.get("system_prompt")
+
+    # Prepare Groq Messages
+    groq_messages = []
+    if system_prompt:
+        groq_messages.append({"role": "system", "content": system_prompt})
+
+    # Append past history to keep context
+    groq_messages.extend(history)
+
+    # Append current message
+    current_msg = {"role": "user", "content": message.text}
+    groq_messages.append(current_msg)
+
+    processing_msg = await message.reply_text("⏳ Thinking...")
+
+    try:
+        groq_client = AsyncGroq(api_key=api_key)
+        chat_completion = await groq_client.chat.completions.create(
+            messages=groq_messages,
+            model=model_id,
+        )
+
+        bot_response = chat_completion.choices[0].message.content
+
+        # Save to MongoDB to maintain context
+        await chats_col.update_one(
+            {"_id": active_chat_id},
+            {"$push": {
+                "history": {
+                    "$each": [
+                        current_msg,
+                        {"role": "assistant", "content": bot_response}
+                    ]
+                }
+            }}
+        )
+
+        await processing_msg.edit_text(bot_response)
+
+    except Exception as e:
+        await processing_msg.edit_text(f"❌ **Error aagaya bhai:**\n`{str(e)}`")
+
+
+# Run Bot
+if __name__ == "__main__":
+    print("🚀 Bot is starting...")
+    app.run()
