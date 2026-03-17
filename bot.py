@@ -24,7 +24,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 # Alerify aur Target Bots ke liye config
 ALERIFY_URL = "https://rapid-x-chi.vercel.app/send"
 TARGET_BOTS = {
-    "spotty-mufi-mafia-bd412381.koyeb.app/": "Kristeen & DDLJ",
+    "https://spotty-mufi-mafia-bd412381.koyeb.app": "Kristeen & DDLJ",
     # Future me aur URLs yahan add kar dena
 }
 
