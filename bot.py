@@ -262,20 +262,19 @@ async def check_mongo_connection():
 async def main():
     print("🚀 Starting Bot & Web Server...")
     
-    # Sabse pehle MongoDB check karega
+    # Sabse pehle MongoDB check karega (Jo tune last time add kiya tha)
     await check_mongo_connection()
     
     # 1. Start Telegram Bot
     await app.start()
     print("✅ Telegram Bot is Online!")
 
-    # 2. Start Web Server (Render ke liye + Tere dusre bot ke Pinger ke liye)
+    # 2. Start Web Server (Render ke liye)
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
     await runner.setup()
     
-    # Render PORT environment variable deta hai, varna 8000 pe run hoga
     port = int(os.environ.get("PORT", 8000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -284,18 +283,21 @@ async def main():
     try:
         # 3. Idle rakhna taaki script band na ho
         await idle()
+    except asyncio.CancelledError:
+        pass  # Render jab restart karta hai toh isko cancel karta hai, isliye ignore
     except Exception as e:
         print(f"⚠️ Bot crashed: {e}")
     finally:
-        # 4. Stop properly if script is killed
+        # 4. Stop properly
         print("🛑 Stopping services...")
-        await app.stop()
         await runner.cleanup()
+        await app.stop()
         print("✅ Gracefully shut down.")
 
 if __name__ == "__main__":
-    import sys
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
-    asyncio.run(main())
+    # YAHAN CHANGE KIYA HAI - Loop Conflict Fix
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("🛑 Bot stopped by user (Ctrl+C).")
