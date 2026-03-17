@@ -253,25 +253,33 @@ async def main():
     await app.start()
     print("✅ Telegram Bot is Online!")
 
-    # 2. Start Web Server (Render ke liye + Tere dusre bot ke Pinger ke liye)
+    # 2. Start Web Server
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
     await runner.setup()
     
-    # Render PORT environment variable deta hai, varna 8000 pe run hoga
     port = int(os.environ.get("PORT", 8000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"🌐 Web Server is running on port {port}!")
 
-    # 3. Idle rakhna taaki script band na ho
-    await idle()
-
-    # 4. Stop properly if script is killed
-    print("🛑 Stopping services...")
-    await app.stop()
-    await runner.cleanup()
+    try:
+        # 3. Idle rakhna taaki script band na ho
+        await idle()
+    except Exception as e:
+        print(f"⚠️ Bot crashed: {e}")
+    finally:
+        # 4. Stop properly if script is killed
+        print("🛑 Stopping services...")
+        await app.stop()
+        await runner.cleanup()
+        print("✅ Gracefully shut down.")
 
 if __name__ == "__main__":
+    # Event loop policy Windows/Linux ke liye fix (helps with task destroyed errors)
+    import sys
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
     asyncio.run(main())
