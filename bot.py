@@ -69,14 +69,14 @@ async def start_cmd(client, message):
         "🤖 **Welcome to Groq AI Bot!**\n\n"
         "Sirf Admin (Aap) mujhe use kar sakte hain.\n\n"
         "**Setup Commands:**\n"
-        "`/set_api <api_key>` - Set apna Groq API\n"
-        "`/set_model <model_id>` - Set Model (default: llama3-8b-8192)\n\n"
+        "/set_api <api_key> - Set apna Groq API\n"
+        "/set_model <model_id> - Set Model (default: llama3-8b-8192)\n\n"
         "**Chat Commands:**\n"
-        "`/newchat` - Start fresh chat\n"
-        "`/showchat` - Manage chats (Select/Delete)\n"
-        "`/system_prompt <text>` - Set system prompt for current chat\n"
-        "`/renamechat <name>` - Active chat ka naam change karein\n"
-        "`/system_prompt delete` - Remove system prompt\n"
+        "/newchat - Start fresh chat\n"
+        "/showchat - Manage chats (Select/Delete)\n"
+        "/system_prompt <text> - Set system prompt for current chat\n"
+        "/renamechat <name> - Active chat ka naam change karein\n"
+        "/system_prompt delete - Remove system prompt\n"
     )
     await message.reply_text(text)
 
