@@ -1,14 +1,16 @@
 import os
 import uuid
 import asyncio
-import sys  
+import sys
+import time  # Pinger ke liye
 from datetime import datetime
 from dotenv import load_dotenv
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from groq import AsyncGroq
-from aiohttp import web  # Web server ke liye import
+from aiohttp import web  # Web server ke liye
+import aiohttp  # Alerify API calls ke liye
 
 # Load Environment Variables
 load_dotenv()
@@ -17,6 +19,13 @@ API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 MONGO_URI = os.getenv("MONGO_URI")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
+
+# Alerify aur Target Bots ke liye config (aap yahan direct bhi daal sakte hain)
+ALERIFY_URL = "https://rapid-x-chi.vercel.app/send"
+TARGET_BOTS = {
+    "spotty-mufi-mafia-bd412381.koyeb.app/": "Kristeen & DDLJ",
+    # Future me aur URLs yahan add kar dena
+}
 
 # Initialize Pyrogram App
 app = Client("groq_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -33,11 +42,130 @@ async def is_admin(_, __, message):
 
 admin_only = filters.create(is_admin)
 
-# --- Web Server (Render & Pinger ko khush karne ke liye) ---
+# -------------------------------------------------------------------
+# Web Server – Health Check (Render / Koyeb ke liye)
+# -------------------------------------------------------------------
 async def health_check(request):
     return web.Response(text="Groq AI Bot is ALIVE and running! 🚀")
 
-# --- Helper Functions ---
+# -------------------------------------------------------------------
+# Alerify Alert Sender (same as first code)
+# -------------------------------------------------------------------
+async def send_alerify_alert(subject: str, tg_msg: str, email_msg: str):
+    payload = {
+        "subject": subject,
+        "tg_html_message": tg_msg,
+        "email_html_message": email_msg
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(ALERIFY_URL, json=payload) as resp:
+                if resp.status == 200:
+                    print(f"✅ Alert Sent: {subject}")
+                else:
+                    print(f"⚠️ Alerify API Failed with status {resp.status}")
+    except Exception as e:
+        print(f"❌ Failed to connect to Alerify API: {e}")
+
+# -------------------------------------------------------------------
+# Startup Alert (is bot ke start hone par)
+# -------------------------------------------------------------------
+async def send_startup_alert():
+    """Bot ke start hone ke baad ek alert bhejta hai"""
+    try:
+        me = app.me
+        bot_name = me.mention if hasattr(me, 'mention') else f"@{me.username}" if me.username else me.first_name
+        subject = "🚀 Groq Chat Bot Started"
+        tg_msg = f"<b>Groq AI Bot is now online!</b>\n\n• {bot_name}"
+        email_msg = f"<h2>Bot Started</h2><p>{bot_name}</p>"
+        await send_alerify_alert(subject, tg_msg, email_msg)
+    except Exception as e:
+        print(f"⚠️ Could not send startup alert: {e}")
+
+# -------------------------------------------------------------------
+# URL Checker Helper (for Pinger)
+# -------------------------------------------------------------------
+async def check_url(session, url):
+    try:
+        # Ensure URL has protocol
+        if not url.startswith(('http://', 'https://')):
+            url = 'https://' + url
+        async with session.get(url, timeout=10) as response:
+            return url, response.status == 200
+    except Exception:
+        return url, False
+
+# -------------------------------------------------------------------
+# Pinger Task (monitors TARGET_BOTS)
+# -------------------------------------------------------------------
+async def ping_other_bot():
+    """Har 20 second mein TARGET_BOTS ko ping karega, down/up alerts aur hourly report bhejega."""
+    if not TARGET_BOTS:
+        print("⚠️ TARGET_BOTS empty hai. Pinger start nahi hua.")
+        return
+
+    print(f"🔄 Advanced Pinger started for {len(TARGET_BOTS)} Bots...")
+    bot_states = {url: True for url in TARGET_BOTS.keys()}
+    last_hourly_report_time = time.time()
+
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                tasks = [check_url(session, url) for url in TARGET_BOTS.keys()]
+                results = await asyncio.gather(*tasks)
+
+                for url, is_up in results:
+                    bot_name = TARGET_BOTS[url]
+                    was_up = bot_states[url]
+
+                    if not is_up and was_up:
+                        # Bot just went DOWN
+                        bot_states[url] = False
+                        subject = f"🚨 URGENT: {bot_name} is DOWN!"
+                        tg_msg = f"<b>Bot Alert!</b>\n\n❌ <b>{bot_name}</b> respond nahi kar raha.\n🔗 URL: {url}\n⏳ Status: <b>DOWN</b>"
+                        email_msg = f"<h2>Bot Down Alert</h2><p><b>{bot_name}</b> is offline.</p><p>URL: {url}</p>"
+                        await send_alerify_alert(subject, tg_msg, email_msg)
+
+                    elif is_up and not was_up:
+                        # Bot just recovered
+                        bot_states[url] = True
+                        subject = f"✅ RECOVERED: {bot_name} is UP!"
+                        tg_msg = f"<b>Bot Recovery</b>\n\n✅ <b>{bot_name}</b> wapas online aa gaya!\n🔗 URL: {url}\n⏳ Status: <b>UP</b>"
+                        email_msg = f"<h2>Bot Recovery</h2><p><b>{bot_name}</b> is back online.</p><p>URL: {url}</p>"
+                        await send_alerify_alert(subject, tg_msg, email_msg)
+
+            # Hourly report (every 3600 seconds)
+            current_time = time.time()
+            if current_time - last_hourly_report_time >= 3600:
+                last_hourly_report_time = current_time
+
+                report_tg = "<b>Hourly Bot Status Report 📊</b>\n\n"
+                report_email = "<h2>Hourly Bot Status Report 📊</h2><ul>"
+                all_good = True
+
+                for url, state in bot_states.items():
+                    b_name = TARGET_BOTS[url]
+                    status_icon = "🟢 UP" if state else "🔴 DOWN"
+                    if not state:
+                        all_good = False
+                    report_tg += f"• {b_name}: <b>{status_icon}</b>\n"
+                    report_email += f"<li>{b_name}: {status_icon}</li>"
+
+                report_email += "</ul>"
+                subject = "🟢 All Systems Nominal" if all_good else "⚠️ System Status Report (Issues Detected)"
+                await send_alerify_alert(subject, report_tg, report_email)
+
+        except Exception as e:
+            print(f"Pinger Core Error: {e}")
+
+        await asyncio.sleep(20)
+
+# -------------------------------------------------------------------
+# (Baaki ke helper functions aur command handlers yahan hain...)
+# -------------------------------------------------------------------
+# NOTE: Main neeche diye gaye functions aapke original code se copy kiye hain.
+# Unme koi changes nahi kiye, bas pinger integration ke liye main() modify kiya hai.
+# -------------------------------------------------------------------
 
 async def get_user_data(user_id):
     user = await users_col.find_one({"_id": user_id})
@@ -258,18 +386,25 @@ async def check_mongo_connection():
         print("👉 Hint: Apna MONGO_URI check kar aur MongoDB Atlas me Network Access -> '0.0.0.0/0' (Allow Anywhere) set kar.")
         sys.exit(1)  # Agar DB connect nahi hua toh script yahin rok dega
 
-# --- DUAL RUNNER (Telegram + Web Server) ---
+# --- DUAL RUNNER (Telegram + Web Server + Pinger) ---
 async def main():
-    print("🚀 Starting Bot & Web Server...")
+    print("🚀 Starting Bot, Web Server & Pinger...")
     
-    # Sabse pehle MongoDB check karega (Jo tune last time add kiya tha)
+    # Sabse pehle MongoDB check karega
     await check_mongo_connection()
     
     # 1. Start Telegram Bot
     await app.start()
     print("✅ Telegram Bot is Online!")
 
-    # 2. Start Web Server (Render ke liye)
+    # 2. Send startup alert (is bot ke liye)
+    await send_startup_alert()
+
+    # 3. Start Pinger background task
+    asyncio.create_task(ping_other_bot())
+    print("🔄 Pinger background task started.")
+
+    # 4. Start Web Server (Render ke liye)
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
@@ -281,21 +416,21 @@ async def main():
     print(f"🌐 Web Server is running on port {port}!")
 
     try:
-        # 3. Idle rakhna taaki script band na ho
+        # 5. Idle rakhna taaki script band na ho
         await idle()
     except asyncio.CancelledError:
         pass  # Render jab restart karta hai toh isko cancel karta hai, isliye ignore
     except Exception as e:
         print(f"⚠️ Bot crashed: {e}")
     finally:
-        # 4. Stop properly
+        # 6. Stop properly
         print("🛑 Stopping services...")
         await runner.cleanup()
         await app.stop()
         print("✅ Gracefully shut down.")
 
 if __name__ == "__main__":
-    # YAHAN CHANGE KIYA HAI - Loop Conflict Fix
+    # Loop Conflict Fix
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(main())
