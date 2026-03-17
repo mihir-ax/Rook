@@ -2,15 +2,16 @@ import os
 import uuid
 import asyncio
 import sys
-import time  # Pinger ke liye
+import time
+import io  # <-- for file sending
 from datetime import datetime
 from dotenv import load_dotenv
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from groq import AsyncGroq
-from aiohttp import web  # Web server ke liye
-import aiohttp  # Alerify API calls ke liye
+from aiohttp import web
+import aiohttp
 
 # Load Environment Variables
 load_dotenv()
@@ -20,7 +21,7 @@ API_HASH = os.getenv("API_HASH")
 MONGO_URI = os.getenv("MONGO_URI")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Alerify aur Target Bots ke liye config (aap yahan direct bhi daal sakte hain)
+# Alerify aur Target Bots ke liye config
 ALERIFY_URL = "https://rapid-x-chi.vercel.app/send"
 TARGET_BOTS = {
     "spotty-mufi-mafia-bd412381.koyeb.app/": "Kristeen & DDLJ",
@@ -43,13 +44,13 @@ async def is_admin(_, __, message):
 admin_only = filters.create(is_admin)
 
 # -------------------------------------------------------------------
-# Web Server – Health Check (Render / Koyeb ke liye)
+# Web Server – Health Check
 # -------------------------------------------------------------------
 async def health_check(request):
     return web.Response(text="Groq AI Bot is ALIVE and running! 🚀")
 
 # -------------------------------------------------------------------
-# Alerify Alert Sender (same as first code)
+# Alerify Alert Sender
 # -------------------------------------------------------------------
 async def send_alerify_alert(subject: str, tg_msg: str, email_msg: str):
     payload = {
@@ -68,10 +69,9 @@ async def send_alerify_alert(subject: str, tg_msg: str, email_msg: str):
         print(f"❌ Failed to connect to Alerify API: {e}")
 
 # -------------------------------------------------------------------
-# Startup Alert (is bot ke start hone par)
+# Startup Alert
 # -------------------------------------------------------------------
 async def send_startup_alert():
-    """Bot ke start hone ke baad ek alert bhejta hai"""
     try:
         me = app.me
         bot_name = me.mention if hasattr(me, 'mention') else f"@{me.username}" if me.username else me.first_name
@@ -87,7 +87,6 @@ async def send_startup_alert():
 # -------------------------------------------------------------------
 async def check_url(session, url):
     try:
-        # Ensure URL has protocol
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         async with session.get(url, timeout=10) as response:
@@ -96,10 +95,9 @@ async def check_url(session, url):
         return url, False
 
 # -------------------------------------------------------------------
-# Pinger Task (monitors TARGET_BOTS)
+# Pinger Task
 # -------------------------------------------------------------------
 async def ping_other_bot():
-    """Har 20 second mein TARGET_BOTS ko ping karega, down/up alerts aur hourly report bhejega."""
     if not TARGET_BOTS:
         print("⚠️ TARGET_BOTS empty hai. Pinger start nahi hua.")
         return
@@ -119,7 +117,6 @@ async def ping_other_bot():
                     was_up = bot_states[url]
 
                     if not is_up and was_up:
-                        # Bot just went DOWN
                         bot_states[url] = False
                         subject = f"🚨 URGENT: {bot_name} is DOWN!"
                         tg_msg = f"<b>Bot Alert!</b>\n\n❌ <b>{bot_name}</b> respond nahi kar raha.\n🔗 URL: {url}\n⏳ Status: <b>DOWN</b>"
@@ -127,14 +124,12 @@ async def ping_other_bot():
                         await send_alerify_alert(subject, tg_msg, email_msg)
 
                     elif is_up and not was_up:
-                        # Bot just recovered
                         bot_states[url] = True
                         subject = f"✅ RECOVERED: {bot_name} is UP!"
                         tg_msg = f"<b>Bot Recovery</b>\n\n✅ <b>{bot_name}</b> wapas online aa gaya!\n🔗 URL: {url}\n⏳ Status: <b>UP</b>"
                         email_msg = f"<h2>Bot Recovery</h2><p><b>{bot_name}</b> is back online.</p><p>URL: {url}</p>"
                         await send_alerify_alert(subject, tg_msg, email_msg)
 
-            # Hourly report (every 3600 seconds)
             current_time = time.time()
             if current_time - last_hourly_report_time >= 3600:
                 last_hourly_report_time = current_time
@@ -161,12 +156,8 @@ async def ping_other_bot():
         await asyncio.sleep(20)
 
 # -------------------------------------------------------------------
-# (Baaki ke helper functions aur command handlers yahan hain...)
+# Helper Functions for User/Chat Management
 # -------------------------------------------------------------------
-# NOTE: Main neeche diye gaye functions aapke original code se copy kiye hain.
-# Unme koi changes nahi kiye, bas pinger integration ke liye main() modify kiya hai.
-# -------------------------------------------------------------------
-
 async def get_user_data(user_id):
     user = await users_col.find_one({"_id": user_id})
     if not user:
@@ -188,8 +179,9 @@ async def create_new_chat(user_id):
     await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": chat_id}})
     return chat_id
 
-# --- Commands ---
-
+# -------------------------------------------------------------------
+# Command: /start
+# -------------------------------------------------------------------
 @app.on_message(filters.command("start") & admin_only)
 async def start_cmd(client, message):
     await get_user_data(message.from_user.id)
@@ -204,10 +196,14 @@ async def start_cmd(client, message):
         "/showchat - Manage chats (Select/Delete)\n"
         "/system_prompt <text> - Set system prompt for current chat\n"
         "/renamechat <name> - Active chat ka naam change karein\n"
+        "/history - Active chat ki poori baatcheet dikhao\n"
         "/system_prompt delete - Remove system prompt\n"
     )
     await message.reply_text(text)
 
+# -------------------------------------------------------------------
+# Command: /set_api
+# -------------------------------------------------------------------
 @app.on_message(filters.command("set_api") & admin_only)
 async def set_api(client, message):
     if len(message.command) < 2:
@@ -217,6 +213,9 @@ async def set_api(client, message):
     await users_col.update_one({"_id": message.from_user.id}, {"$set": {"groq_api": api_key}}, upsert=True)
     await message.reply_text("✅ Groq API Key set ho gayi!")
 
+# -------------------------------------------------------------------
+# Command: /set_model
+# -------------------------------------------------------------------
 @app.on_message(filters.command("set_model") & admin_only)
 async def set_model(client, message):
     if len(message.command) < 2:
@@ -226,11 +225,17 @@ async def set_model(client, message):
     await users_col.update_one({"_id": message.from_user.id}, {"$set": {"model_id": model_id}}, upsert=True)
     await message.reply_text(f"✅ Model ID set to: `{model_id}`")
 
+# -------------------------------------------------------------------
+# Command: /newchat
+# -------------------------------------------------------------------
 @app.on_message(filters.command("newchat") & admin_only)
 async def new_chat(client, message):
     chat_id = await create_new_chat(message.from_user.id)
     await message.reply_text("🆕 **Naya chat start ho gaya!** Ab jo bhejoge fresh context hoga.")
 
+# -------------------------------------------------------------------
+# Command: /renamechat
+# -------------------------------------------------------------------
 @app.on_message(filters.command("renamechat") & admin_only)
 async def rename_chat(client, message):
     user = await get_user_data(message.from_user.id)
@@ -246,6 +251,9 @@ async def rename_chat(client, message):
     await chats_col.update_one({"_id": active_chat}, {"$set": {"title": new_title}})
     await message.reply_text(f"✅ Active chat ka naam update ho gaya!\nNaya naam: **{new_title}**")
 
+# -------------------------------------------------------------------
+# Command: /system_prompt
+# -------------------------------------------------------------------
 @app.on_message(filters.command("system_prompt") & admin_only)
 async def sys_prompt(client, message):
     user = await get_user_data(message.from_user.id)
@@ -268,6 +276,9 @@ async def sys_prompt(client, message):
     await chats_col.update_one({"_id": active_chat}, {"$set": {"system_prompt": prompt_text}})
     await message.reply_text(f"✅ System Prompt set ho gaya:\n`{prompt_text}`")
 
+# -------------------------------------------------------------------
+# Command: /showchat (with inline buttons)
+# -------------------------------------------------------------------
 @app.on_message(filters.command("showchat") & admin_only)
 async def show_chats(client, message):
     chats = await chats_col.find({"user_id": message.from_user.id}).sort("created_at", -1).to_list(10)
@@ -311,9 +322,63 @@ async def handle_chat_buttons(client, callback_query):
         await callback_query.answer("Chat Deleted!", show_alert=True)
         await callback_query.message.delete()
 
-# --- Main AI Chat Handler ---
+# -------------------------------------------------------------------
+# NEW COMMAND: /history - Show full conversation of active chat
+# -------------------------------------------------------------------
+@app.on_message(filters.command("history") & admin_only)
+async def history_cmd(client, message):
+    user = await get_user_data(message.from_user.id)
+    active_chat = user.get("active_chat")
 
-@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "renamechat", "system_prompt"]) & admin_only)
+    if not active_chat:
+        return await message.reply_text("❌ Koi active chat nahi hai. Pehle `/newchat` start karo ya `/showchat` se select karo.")
+
+    chat = await chats_col.find_one({"_id": active_chat})
+    if not chat:
+        return await message.reply_text("❌ Active chat database me nahi mila. Shayad delete ho gaya?")
+    
+    history = chat.get("history", [])
+    system_prompt = chat.get("system_prompt")
+
+    if not history and not system_prompt:
+        return await message.reply_text("📭 Is chat mein abhi koi baat nahi hui hai.")
+
+    # Format the conversation
+    lines = []
+    lines.append(f"**Chat Title:** {chat['title']}\n")
+    if system_prompt:
+        lines.append("**📌 System Prompt:**")
+        lines.append(f"`{system_prompt}`\n")
+    lines.append("**💬 Conversation:**\n")
+
+    for msg in history:
+        role = msg.get("role")
+        content = msg.get("content", "")
+        if role == "user":
+            lines.append(f"👤 **User:** {content}\n")
+        elif role == "assistant":
+            lines.append(f"🤖 **Assistant:** {content}\n")
+        else:
+            lines.append(f"**{role}:** {content}\n")
+
+    full_text = "\n".join(lines)
+
+    # Telegram message limit is 4096 characters
+    if len(full_text) <= 4096:
+        await message.reply_text(full_text)
+    else:
+        # Send as a text file
+        file_data = io.BytesIO(full_text.encode('utf-8'))
+        file_data.name = f"chat_history_{active_chat[:8]}.txt"
+        await message.reply_document(
+            document=file_data,
+            caption=f"📜 **Poori baatcheet** (Character count: {len(full_text)})\nChat: {chat['title']}"
+        )
+
+# -------------------------------------------------------------------
+# Main AI Chat Handler
+# -------------------------------------------------------------------
+@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "renamechat", "system_prompt", "history"]) & admin_only)
 async def chat_handler(client, message):
     user = await get_user_data(message.from_user.id)
 
@@ -373,10 +438,12 @@ async def chat_handler(client, message):
     except Exception as e:
         await processing_msg.edit_text(f"❌ **Error aagaya bhai:**\n`{str(e)}`")
 
+# -------------------------------------------------------------------
+# MongoDB Connection Check
+# -------------------------------------------------------------------
 async def check_mongo_connection():
     print("🔄 Checking MongoDB Connection...")
     try:
-        # Pinging the database
         await db_client.admin.command('ping')
         print("✅ MongoDB Connected Successfully! (IP is Whitelisted)")
         return True
@@ -384,27 +451,24 @@ async def check_mongo_connection():
         print(f"❌ MongoDB Connection FAILED!")
         print(f"⚠️ Error: {e}")
         print("👉 Hint: Apna MONGO_URI check kar aur MongoDB Atlas me Network Access -> '0.0.0.0/0' (Allow Anywhere) set kar.")
-        sys.exit(1)  # Agar DB connect nahi hua toh script yahin rok dega
+        sys.exit(1)
 
-# --- DUAL RUNNER (Telegram + Web Server + Pinger) ---
+# -------------------------------------------------------------------
+# Main entry point (Telegram + Web Server + Pinger)
+# -------------------------------------------------------------------
 async def main():
     print("🚀 Starting Bot, Web Server & Pinger...")
     
-    # Sabse pehle MongoDB check karega
     await check_mongo_connection()
     
-    # 1. Start Telegram Bot
     await app.start()
     print("✅ Telegram Bot is Online!")
 
-    # 2. Send startup alert (is bot ke liye)
     await send_startup_alert()
 
-    # 3. Start Pinger background task
     asyncio.create_task(ping_other_bot())
     print("🔄 Pinger background task started.")
 
-    # 4. Start Web Server (Render ke liye)
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
@@ -416,21 +480,18 @@ async def main():
     print(f"🌐 Web Server is running on port {port}!")
 
     try:
-        # 5. Idle rakhna taaki script band na ho
         await idle()
     except asyncio.CancelledError:
-        pass  # Render jab restart karta hai toh isko cancel karta hai, isliye ignore
+        pass
     except Exception as e:
         print(f"⚠️ Bot crashed: {e}")
     finally:
-        # 6. Stop properly
         print("🛑 Stopping services...")
         await runner.cleanup()
         await app.stop()
         print("✅ Gracefully shut down.")
 
 if __name__ == "__main__":
-    # Loop Conflict Fix
     loop = asyncio.get_event_loop()
     try:
         loop.run_until_complete(main())
