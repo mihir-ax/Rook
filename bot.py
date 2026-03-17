@@ -295,9 +295,4 @@ async def main():
         print("✅ Gracefully shut down.")
 
 if __name__ == "__main__":
-    # YAHAN CHANGE KIYA HAI - Loop Conflict Fix
-    loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        print("🛑 Bot stopped by user (Ctrl+C).")
+    asyncio.run(main())
