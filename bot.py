@@ -1,6 +1,7 @@
 import os
 import uuid
 import asyncio
+import sys  
 from datetime import datetime
 from dotenv import load_dotenv
 from pyrogram import Client, filters, idle
@@ -244,21 +245,37 @@ async def chat_handler(client, message):
     except Exception as e:
         await processing_msg.edit_text(f"❌ **Error aagaya bhai:**\n`{str(e)}`")
 
+async def check_mongo_connection():
+    print("🔄 Checking MongoDB Connection...")
+    try:
+        # Pinging the database
+        await db_client.admin.command('ping')
+        print("✅ MongoDB Connected Successfully! (IP is Whitelisted)")
+        return True
+    except Exception as e:
+        print(f"❌ MongoDB Connection FAILED!")
+        print(f"⚠️ Error: {e}")
+        print("👉 Hint: Apna MONGO_URI check kar aur MongoDB Atlas me Network Access -> '0.0.0.0/0' (Allow Anywhere) set kar.")
+        sys.exit(1)  # Agar DB connect nahi hua toh script yahin rok dega
 
 # --- DUAL RUNNER (Telegram + Web Server) ---
 async def main():
     print("🚀 Starting Bot & Web Server...")
     
+    # Sabse pehle MongoDB check karega
+    await check_mongo_connection()
+    
     # 1. Start Telegram Bot
     await app.start()
     print("✅ Telegram Bot is Online!")
 
-    # 2. Start Web Server
+    # 2. Start Web Server (Render ke liye + Tere dusre bot ke Pinger ke liye)
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
     await runner.setup()
     
+    # Render PORT environment variable deta hai, varna 8000 pe run hoga
     port = int(os.environ.get("PORT", 8000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
@@ -277,7 +294,6 @@ async def main():
         print("✅ Gracefully shut down.")
 
 if __name__ == "__main__":
-    # Event loop policy Windows/Linux ke liye fix (helps with task destroyed errors)
     import sys
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
