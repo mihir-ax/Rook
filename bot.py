@@ -4,16 +4,18 @@ import asyncio
 import sys
 import time
 import io
+import json
 import re
 import pytz
 from datetime import datetime
 from dotenv import load_dotenv
-from pyrogram import Client, filters, idle, enums
+from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from motor.motor_asyncio import AsyncIOMotorClient
 from groq import AsyncGroq
 from aiohttp import web
 import aiohttp
+import pyrogram.enums
 
 # Load Environment Variables
 load_dotenv()
@@ -23,11 +25,12 @@ API_HASH = os.getenv("API_HASH")
 MONGO_URI = os.getenv("MONGO_URI")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Alerify aur Target Bots ke liye config
+# Configuration
 ALERIFY_URL = "https://rapid-x-chi.vercel.app/send"
 TARGET_BOTS = {
     "https://spotty-mufi-mafia-bd412381.koyeb.app": "Kristeen & DDLJ",
 }
+IST = pytz.timezone('Asia/Kolkata')
 
 # Initialize Pyrogram App
 app = Client("groq_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
@@ -38,153 +41,95 @@ db = db_client["GroqBotDB"]
 users_col = db["users"]
 chats_col = db["chats"]
 reminders_col = db["reminders"]
-todos_col = db["todos"]
-
-ist_tz = pytz.timezone("Asia/Kolkata")
+wallets_col = db["wallets"]
+transactions_col = db["transactions"]
 
 # Custom Filter for Admin Only
 async def is_admin(_, __, message):
     return message.from_user and message.from_user.id == ADMIN_ID
-
 admin_only = filters.create(is_admin)
 
 # -------------------------------------------------------------------
-# Helper: Markdown to Telegram HTML Parser
+# Helper: Markdown to HTML Parser
 # -------------------------------------------------------------------
-def md_to_tg_html(text: str) -> str:
-    # Headers ### to Bold
-    text = re.sub(r'###\s+(.*)', r'<b>\1</b>', text)
-    text = re.sub(r'##\s+(.*)', r'<b>\1</b>', text)
-    text = re.sub(r'#\s+(.*)', r'<b>\1</b>', text)
-    # Bold **text**
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    # Italic *text*
-    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
-    # Code Blocks
-    text = re.sub(r'```(?:.*?)\n(.*?)```', r'<pre>\1</pre>', text, flags=re.DOTALL)
-    # Inline Code
-    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
-    # Unordered Lists - to •
-    text = re.sub(r'^\s*-\s+', r'• ', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*\*\s+', r'• ', text, flags=re.MULTILINE)
-    
-    # Escape accidental unclosed tags if necessary (Basic protection)
-    text = text.replace("<br>", "\n")
+def markdown_to_html(text):
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text) # Bold
+    text = re.sub(r'(?<!\*)\*(?!\*)(.*?)\*', r'<i>\1</i>', text) # Italic
+    text = re.sub(r'```(.*?)```', r'<pre><code>\1</code></pre>', text, flags=re.DOTALL) # Code block
+    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text) # Inline code
+    text = re.sub(r'~~(.*?)~~', r'<s>\1</s>', text) # Strikethrough
     return text
 
 # -------------------------------------------------------------------
-# Web Server – Health Check
+# Web Server & Alerify Pinger
 # -------------------------------------------------------------------
 async def health_check(request):
-    return web.Response(text="Groq AI Bot PRO is ALIVE and running! 🚀")
+    return web.Response(text="Groq AI Bot is ALIVE and running! 🚀")
 
-# -------------------------------------------------------------------
-# Alerify Alert Sender
-# -------------------------------------------------------------------
 async def send_alerify_alert(subject: str, tg_msg: str, email_msg: str):
-    payload = {
-        "subject": subject,
-        "tg_html_message": tg_msg,
-        "email_html_message": email_msg
-    }
+    payload = {"subject": subject, "tg_html_message": tg_msg, "email_html_message": email_msg}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(ALERIFY_URL, json=payload) as resp:
-                if resp.status == 200:
-                    print(f"✅ Alert Sent: {subject}")
-                else:
-                    print(f"⚠️ Alerify API Failed with status {resp.status}")
-    except Exception as e:
-        print(f"❌ Failed to connect to Alerify API: {e}")
+            await session.post(ALERIFY_URL, json=payload)
+    except Exception:
+        pass
 
-# -------------------------------------------------------------------
-# Startup Alert
-# -------------------------------------------------------------------
 async def send_startup_alert():
     try:
         me = await app.get_me()
-        bot_name = me.mention if hasattr(me, 'mention') else f"@{me.username}" if me.username else me.first_name
-        subject = "🚀 Groq Chat Bot PRO Started"
-        tg_msg = f"<b>Groq AI Bot is now online!</b>\n\n• {bot_name}"
-        email_msg = f"<h2>Bot Started</h2><p>{bot_name}</p>"
-        await send_alerify_alert(subject, tg_msg, email_msg)
-    except Exception as e:
-        print(f"⚠️ Could not send startup alert: {e}")
+        bot_name = me.mention if hasattr(me, 'mention') else me.first_name
+        await send_alerify_alert("🚀 Groq Chat Bot Started", f"<b>Groq AI Bot Online!</b>\n\n• {bot_name}", f"<h2>Bot Started</h2><p>{bot_name}</p>")
+    except Exception:
+        pass
 
-# -------------------------------------------------------------------
-# URL Checker Helper (for Pinger)
-# -------------------------------------------------------------------
 async def check_url(session, url):
     try:
-        if not url.startswith(('http://', 'https://')):
-            url = 'https://' + url
+        if not url.startswith(('http://', 'https://')): url = 'https://' + url
         async with session.get(url, timeout=10) as response:
             return url, response.status == 200
     except Exception:
         return url, False
 
-# -------------------------------------------------------------------
-# Pinger Task
-# -------------------------------------------------------------------
 async def ping_other_bot():
-    if not TARGET_BOTS:
-        return
-
-    print(f"🔄 Advanced Pinger started for {len(TARGET_BOTS)} Bots...")
+    if not TARGET_BOTS: return
     bot_states = {url: True for url in TARGET_BOTS.keys()}
-    last_hourly_report_time = time.time()
-
     while True:
         try:
             async with aiohttp.ClientSession() as session:
                 tasks = [check_url(session, url) for url in TARGET_BOTS.keys()]
                 results = await asyncio.gather(*tasks)
-
                 for url, is_up in results:
-                    bot_name = TARGET_BOTS[url]
                     was_up = bot_states[url]
-
                     if not is_up and was_up:
                         bot_states[url] = False
-                        subject = f"🚨 URGENT: {bot_name} is DOWN!"
-                        tg_msg = f"<b>Bot Alert!</b>\n\n❌ <b>{bot_name}</b> respond nahi kar raha.\n🔗 URL: {url}\n⏳ Status: <b>DOWN</b>"
-                        email_msg = f"<h2>Bot Down Alert</h2><p><b>{bot_name}</b> is offline.</p><p>URL: {url}</p>"
-                        await send_alerify_alert(subject, tg_msg, email_msg)
-
+                        await send_alerify_alert(f"🚨 URGENT: {TARGET_BOTS[url]} DOWN!", f"❌ <b>{TARGET_BOTS[url]}</b> is DOWN!\n🔗 {url}", "")
                     elif is_up and not was_up:
                         bot_states[url] = True
-                        subject = f"✅ RECOVERED: {bot_name} is UP!"
-                        tg_msg = f"<b>Bot Recovery</b>\n\n✅ <b>{bot_name}</b> wapas online aa gaya!\n🔗 URL: {url}\n⏳ Status: <b>UP</b>"
-                        email_msg = f"<h2>Bot Recovery</h2><p><b>{bot_name}</b> is back online.</p><p>URL: {url}</p>"
-                        await send_alerify_alert(subject, tg_msg, email_msg)
-
-            current_time = time.time()
-            if current_time - last_hourly_report_time >= 3600:
-                last_hourly_report_time = current_time
-
-                report_tg = "<b>Hourly Bot Status Report 📊</b>\n\n"
-                report_email = "<h2>Hourly Bot Status Report 📊</h2><ul>"
-                all_good = True
-
-                for url, state in bot_states.items():
-                    b_name = TARGET_BOTS[url]
-                    status_icon = "🟢 UP" if state else "🔴 DOWN"
-                    if not state:
-                        all_good = False
-                    report_tg += f"• {b_name}: <b>{status_icon}</b>\n"
-                    report_email += f"<li>{b_name}: {status_icon}</li>"
-
-                report_email += "</ul>"
-                subject = "🟢 All Systems Nominal" if all_good else "⚠️ System Status Report (Issues Detected)"
-                await send_alerify_alert(subject, report_tg, report_email)
-
-        except Exception as e:
-            print(f"Pinger Core Error: {e}")
-
-        await asyncio.sleep(20)
+                        await send_alerify_alert(f"✅ RECOVERED: {TARGET_BOTS[url]} UP!", f"✅ <b>{TARGET_BOTS[url]}</b> is UP!\n🔗 {url}", "")
+        except Exception:
+            pass
+        await asyncio.sleep(60)
 
 # -------------------------------------------------------------------
-# Helper Functions for DB
+# Background Task: Reminder Worker
+# -------------------------------------------------------------------
+async def reminder_worker():
+    print("⏰ Reminder Worker Started...")
+    while True:
+        try:
+            now = datetime.now(IST)
+            due_reminders = await reminders_col.find({"status": "pending", "remind_time": {"$lte": now}}).to_list(None)
+            for r in due_reminders:
+                task_html = markdown_to_html(r["task"])
+                alert_msg = f"🚨 <b>REMINDER ALARM</b> 🚨\n\n👉 {task_html}\n\n<i>Set by your AI Assistant</i>"
+                await app.send_message(r["user_id"], alert_msg, parse_mode=pyrogram.enums.ParseMode.HTML)
+                await reminders_col.update_one({"_id": r["_id"]}, {"$set": {"status": "completed"}})
+        except Exception as e:
+            print(f"Reminder Worker Error: {e}")
+        await asyncio.sleep(30)
+
+# -------------------------------------------------------------------
+# DB Helpers
 # -------------------------------------------------------------------
 async def get_user_data(user_id):
     user = await users_col.find_one({"_id": user_id})
@@ -195,402 +140,211 @@ async def get_user_data(user_id):
 
 async def create_new_chat(user_id):
     chat_id = uuid.uuid4().hex
-    
-    # SYSTEM PROMPT INJECTION
-    sys_prompt = (
-        "You are an advanced Telegram Personal Assistant.\n"
-        "You have superpowers to execute commands by outputting specific tags in your response. "
-        "These tags will be processed by the system and hidden from the user.\n\n"
-        "1. To set a reminder, output EXACTLY this format anywhere in text:\n"
-        "[REMINDER: YYYY-MM-DD HH:MM:SS | Your reminder message]\n"
-        "2. To create a Telegram Poll, output EXACTLY this:\n"
-        "[POLL: Question | Option1, Option2, Option3 | is_anonymous(True/False)]\n"
-        "3. To add a task to To-Do list:\n"
-        "[TODO_ADD: Task details]\n"
-        "4. To mark a task done:\n"
-        "[TODO_DONE: Task details]\n\n"
-        "Always use the Indian Standard Time (IST) provided to you for calculating reminder dates. "
-        "Be helpful, concise, and smart."
-    )
-    
-    chat_data = {
-        "_id": chat_id,
-        "user_id": user_id,
-        "title": f"Chat {datetime.now(ist_tz).strftime('%d-%m %H:%M')}",
-        "system_prompt": sys_prompt,
-        "history": [],
-        "created_at": datetime.now(ist_tz)
-    }
+    chat_data = {"_id": chat_id, "user_id": user_id, "title": f"Chat {datetime.now(IST).strftime('%d-%m %H:%M')}", "system_prompt": None, "history": [], "created_at": datetime.now(IST)}
     await chats_col.insert_one(chat_data)
     await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": chat_id}})
     return chat_id
 
 # -------------------------------------------------------------------
-# System Background Workers (Reminders)
-# -------------------------------------------------------------------
-async def reminder_worker():
-    print("⏰ Auto-Reminder system started...")
-    while True:
-        try:
-            now = datetime.now(ist_tz)
-            due_reminders = await reminders_col.find({"time": {"$lte": now}}).to_list(None)
-            
-            for r in due_reminders:
-                await app.send_message(
-                    r["user_id"], 
-                    f"⏰ **AUTO REMINDER ALARM!**\n\n📌 {r['message']}\n\n_Set by AI at your request._",
-                )
-                await reminders_col.delete_one({"_id": r["_id"]})
-                
-        except Exception as e:
-            pass
-        
-        await asyncio.sleep(20)
-
-# -------------------------------------------------------------------
-# Telegram Commands
+# Commands (Start, Config, Chat Manage)
 # -------------------------------------------------------------------
 @app.on_message(filters.command("start") & admin_only)
 async def start_cmd(client, message):
     await get_user_data(message.from_user.id)
-    text = (
-        "🤖 **Welcome to Groq AI Bot PRO!**\n\n"
-        "I am now an advanced Assistant. I can set reminders, create polls, and manage your to-dos.\n\n"
-        "**Setup Commands:**\n"
-        "/set_api <api_key> - Set apna Groq API\n"
-        "/set_model <model_id> - Set Model (default: llama3-8b-8192)\n\n"
-        "**Chat Commands:**\n"
-        "/newchat - Start fresh chat\n"
-        "/showchat - Manage chats\n"
-        "/renamechat <name> - Rename chat\n"
-        "/history - Get full chat text\n"
-        "/todo - View pending tasks\n"
-    )
+    text = ("🤖 **Welcome to Groq AI Manager!**\n\n"
+            "**Commands:**\n"
+            "/set_api <api_key> - Set Groq API\n"
+            "/set_model <model_id> - Set Model\n"
+            "/newchat - Start fresh chat\n"
+            "/showchat - Manage chats\n"
+            "/history - Full chat history\n"
+            "/finance - Dashboard of your wealth\n")
     await message.reply_text(text)
 
 @app.on_message(filters.command("set_api") & admin_only)
 async def set_api(client, message):
-    if len(message.command) < 2:
-        return await message.reply_text("Bhai API key bhi toh daal: `/set_api gsk_xxx...`")
-
-    api_key = message.command[1]
-    await users_col.update_one({"_id": message.from_user.id}, {"$set": {"groq_api": api_key}}, upsert=True)
-    await message.reply_text("✅ Groq API Key set ho gayi!")
+    if len(message.command) < 2: return await message.reply_text("Bhai API key daal: `/set_api gsk_...`")
+    await users_col.update_one({"_id": message.from_user.id}, {"$set": {"groq_api": message.command[1]}}, upsert=True)
+    await message.reply_text("✅ Groq API Key set!")
 
 @app.on_message(filters.command("set_model") & admin_only)
 async def set_model(client, message):
-    if len(message.command) < 2:
-        return await message.reply_text("Bhai Model ID daal: `/set_model llama3-70b-8192`")
-
-    model_id = message.command[1]
-    await users_col.update_one({"_id": message.from_user.id}, {"$set": {"model_id": model_id}}, upsert=True)
-    await message.reply_text(f"✅ Model ID set to: `{model_id}`")
+    if len(message.command) < 2: return await message.reply_text("Bhai Model ID daal: `/set_model llama3-70b-8192`")
+    await users_col.update_one({"_id": message.from_user.id}, {"$set": {"model_id": message.command[1]}}, upsert=True)
+    await message.reply_text(f"✅ Model ID set to: `{message.command[1]}`")
 
 @app.on_message(filters.command("newchat") & admin_only)
 async def new_chat(client, message):
-    chat_id = await create_new_chat(message.from_user.id)
-    await message.reply_text("🆕 **Naya chat start ho gaya!** Ab jo bhejoge fresh context hoga.")
+    await create_new_chat(message.from_user.id)
+    await message.reply_text("🆕 **Naya chat start ho gaya!**")
 
-@app.on_message(filters.command("renamechat") & admin_only)
-async def rename_chat(client, message):
-    user = await get_user_data(message.from_user.id)
-    active_chat = user.get("active_chat")
-
-    if not active_chat:
-        return await message.reply_text("Bhai koi active chat nahi hai.")
-
-    if len(message.command) < 2:
-        return await message.reply_text("Bhai naya naam bhi toh daal:\n**Example:** `/renamechat Python Project`")
-
-    new_title = message.text.split(" ", 1)[1]
-    await chats_col.update_one({"_id": active_chat}, {"$set": {"title": new_title}})
-    await message.reply_text(f"✅ Active chat ka naam update ho gaya!\nNaya naam: **{new_title}**")
-
-@app.on_message(filters.command("todo") & admin_only)
-async def todo_cmd(client, message):
-    todos = await todos_col.find({"user_id": message.from_user.id, "status": "pending"}).to_list(None)
-    if not todos:
-        return await message.reply_text("🎉 Koi pending task nahi hai bhai! Chill kar.")
+@app.on_message(filters.command("finance") & admin_only)
+async def finance_dashboard(client, message):
+    user_id = message.from_user.id
+    wallet = await wallets_col.find_one({"_id": user_id})
+    if not wallet or not wallet.get("banks"):
+        return await message.reply_text("Bhai bank me kuch nahi hai. AI ko bol 'Mere pass 10,000 Cash hain'.")
     
-    text = "📝 **Your Pending To-Do List:**\n\n"
-    for i, t in enumerate(todos, 1):
-        text += f"{i}. {t['task']}\n"
+    banks = wallet.get("banks")
+    total = sum(banks.values())
+    msg = f"📊 <b>FINANCIAL DASHBOARD</b>\n\n💰 <b>Net Worth:</b> ₹{total:,.2f}\n\n🏦 <b>Accounts:</b>\n"
+    for b, bal in banks.items(): msg += f"• {b}: ₹{bal:,.2f}\n"
     
-    text += "\n_(AI ko bol kar add ya complete kara sakte ho)_"
-    await message.reply_text(text)
-
-@app.on_message(filters.command("showchat") & admin_only)
-async def show_chats(client, message):
-    chats = await chats_col.find({"user_id": message.from_user.id}).sort("created_at", -1).to_list(10)
-    if not chats:
-        return await message.reply_text("Koi history nahi hai bro.")
-
-    user = await get_user_data(message.from_user.id)
-    active_chat = user.get("active_chat")
-
-    buttons = []
-    for chat in chats:
-        title = chat['title']
-        if chat['_id'] == active_chat:
-            title = f"🟢 {title} (Active)"
-        else:
-            title = f"📁 {title}"
-
-        buttons.append([InlineKeyboardButton(title, callback_data=f"select_{chat['_id']}")])
-        buttons.append([InlineKeyboardButton("❌ Delete", callback_data=f"del_{chat['_id']}")])
-
-    reply_markup = InlineKeyboardMarkup(buttons)
-    await message.reply_text("👇 **Apne chats select ya delete karo:**", reply_markup=reply_markup)
-
-@app.on_callback_query(filters.regex(r"^(select|del)_"))
-async def handle_chat_buttons(client, callback_query):
-    action, chat_id = callback_query.data.split("_")
-    user_id = callback_query.from_user.id
-
-    if action == "select":
-        await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": chat_id}})
-        await callback_query.answer("Chat switch ho gaya!", show_alert=True)
-        await callback_query.message.delete()
-        await client.send_message(user_id, "✅ **Chat Switched!** Purana context wapas load ho gaya.")
-
-    elif action == "del":
-        await chats_col.delete_one({"_id": chat_id})
-        user = await get_user_data(user_id)
-        if user.get("active_chat") == chat_id:
-            await users_col.update_one({"_id": user_id}, {"$set": {"active_chat": None}})
-        await callback_query.answer("Chat Deleted!", show_alert=True)
-        await callback_query.message.delete()
-
-@app.on_message(filters.command("history") & admin_only)
-async def history_cmd(client, message):
-    user = await get_user_data(message.from_user.id)
-    active_chat = user.get("active_chat")
-
-    if not active_chat:
-        return await message.reply_text("❌ Koi active chat nahi hai.")
-
-    chat = await chats_col.find_one({"_id": active_chat})
-    if not chat:
-        return await message.reply_text("❌ Active chat database me nahi mila.")
-    
-    history = chat.get("history", [])
-    if not history:
-        return await message.reply_text("📭 Is chat mein abhi koi baat nahi hui hai.")
-
-    lines = []
-    lines.append(f"**Chat Title:** {chat['title']}\n")
-    lines.append("**💬 Conversation:**\n")
-
-    for msg in history:
-        role = msg.get("role")
-        content = msg.get("content", "")
-        if role == "user":
-            lines.append(f"👤 **User:** {content}\n")
-        elif role == "assistant":
-            # Remove system tags from history file for clean reading
-            clean_content = re.sub(r'\[REMINDER:.*?\]', '', content)
-            clean_content = re.sub(r'\[POLL:.*?\]', '', clean_content)
-            clean_content = re.sub(r'\[TODO_ADD:.*?\]', '', clean_content)
-            clean_content = re.sub(r'\[TODO_DONE:.*?\]', '', clean_content)
-            lines.append(f"🤖 **Assistant:** {clean_content.strip()}\n")
-
-    full_text = "\n".join(lines)
-
-    if len(full_text) <= 4096:
-        await message.reply_text(full_text)
-    else:
-        file_data = io.BytesIO(full_text.encode('utf-8'))
-        file_data.name = f"chat_history_{active_chat[:8]}.txt"
-        await message.reply_document(
-            document=file_data,
-            caption=f"📜 **Poori baatcheet**\nChat: {chat['title']}"
-        )
+    recent_tx = await transactions_col.find({"user_id": user_id}).sort("date", -1).to_list(10)
+    if recent_tx:
+        msg += "\n📝 <b>Recent Transactions:</b>\n"
+        for tx in recent_tx:
+            icon = "🟢" if tx['type'] in ['income', 'setup'] else "🔴"
+            dt = tx['date'].strftime("%d %b")
+            msg += f"{icon} ₹{tx['amount']} | {tx['bank']} ({tx['category']}) - <i>{dt}</i>\n"
+            
+    await message.reply_text(msg, parse_mode=pyrogram.enums.ParseMode.HTML)
 
 # -------------------------------------------------------------------
-# AI Chat Handler & Tag Parser
+# MAIN AI ENGINE (Jarvis Logic + Tool Calling)
 # -------------------------------------------------------------------
-@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "renamechat", "system_prompt", "history", "todo"]) & admin_only)
+@app.on_message(filters.text & ~filters.command(["start", "set_api", "set_model", "newchat", "showchat", "renamechat", "system_prompt", "history", "finance"]) & admin_only)
 async def chat_handler(client, message):
     user_id = message.from_user.id
     user = await get_user_data(user_id)
+    api_key, model_id = user.get("groq_api"), user.get("model_id")
 
-    api_key = user.get("groq_api")
-    if not api_key:
-        return await message.reply_text("Bhai API key set kar: `/set_api YOUR_KEY`")
+    if not api_key: return await message.reply_text("Bhai API key set kar le pehle.")
 
     active_chat_id = user.get("active_chat")
-    if not active_chat_id:
-        active_chat_id = await create_new_chat(user_id)
+    if not active_chat_id: active_chat_id = await create_new_chat(user_id)
 
     chat_doc = await chats_col.find_one({"_id": active_chat_id})
     history = chat_doc.get("history", [])
-    system_prompt = chat_doc.get("system_prompt", "")
+    
+    # --- FETCH FINANCE CONTEXT ---
+    user_wallet = await wallets_col.find_one({"_id": user_id})
+    if not user_wallet:
+        user_wallet = {"_id": user_id, "banks": {"Cash": 0}}
+        await wallets_col.insert_one(user_wallet)
+    current_balances = json.dumps(user_wallet.get("banks", {}))
+    
+    # Analytics ke liye Last 30 transactions nikalo
+    recent_txs = await transactions_col.find({"user_id": user_id}).sort("date", -1).to_list(30)
+    tx_history_str = "No recent transactions."
+    if recent_txs:
+        tx_history_str = "\n".join([f"[{t['date'].strftime('%Y-%m-%d %H:%M')}] {t['type'].upper()} | ₹{t['amount']} | Bank: {t['bank']} | Category: {t['category']} | Note: {t['note']}" for t in recent_txs])
 
-    # 1. TIME INJECTION
-    current_time = datetime.now(ist_tz).strftime('%Y-%m-%d %H:%M:%S IST')
-    time_context = f"\n[System Info - Current IST Time: {current_time}]\n"
-    
-    groq_messages = []
-    if system_prompt:
-        groq_messages.append({"role": "system", "content": system_prompt + time_context})
-    
+    # --- THE SYSTEM PROMPT ---
+    current_time = datetime.now(IST).strftime("%A, %d %B %Y, %I:%M %p")
+    sys_prompt = (
+        f"You are J.A.R.V.I.S, a highly intelligent Personal Assistant, Task Manager, and Financial Advisor for the user.\n"
+        f"Current Date/Time: {current_time} (IST timezone).\n\n"
+        
+        f"=== FINANCIAL DATA ===\n"
+        f"Current Bank Balances: {current_balances}\n"
+        f"Recent Transaction History (for analysis):\n{tx_history_str}\n\n"
+        
+        f"=== INSTRUCTIONS FOR TOOLS ===\n"
+        f"If the user asks you to take an ACTION (set reminder or record finance), output exactly the corresponding JSON block at the very end of your response.\n\n"
+        
+        f"1. **REMINDERS:** To set a reminder, output:\n"
+        f"```json\n{{\"action\": \"set_reminder\", \"time\": \"YYYY-MM-DD HH:MM\", \"task\": \"task details\"}}\n```\n\n"
+        
+        f"2. **FINANCE:** To record spending, income, or setting initial balance, output:\n"
+        f"```json\n{{\"action\": \"finance\", \"type\": \"expense|income|setup\", \"bank\": \"Bank Name\", \"amount\": 100, \"category\": \"Food/Shopping/Salary/etc\", \"note\": \"short note\"}}\n```\n"
+        f"(Keep amount positive. Use 'Cash' if no bank is mentioned.)\n\n"
+        
+        f"If the user asks analytical questions like 'Where am I spending the most?' or 'Show my last 5 transactions', use the provided 'Recent Transaction History' to give a detailed, natural language response. You don't need to output JSON for analytical questions.\n"
+    )
+
+    groq_messages = [{"role": "system", "content": sys_prompt}]
     groq_messages.extend(history)
     current_msg = {"role": "user", "content": message.text}
     groq_messages.append(current_msg)
 
-    # Typing Action Start
-    await app.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
-    processing_msg = await message.reply_text("⏳ Thinking...")
+    processing_msg = await message.reply_text(" Thinking...")
 
     try:
         groq_client = AsyncGroq(api_key=api_key)
-        chat_completion = await groq_client.chat.completions.create(
-            messages=groq_messages,
-            model=user.get("model_id", "llama3-8b-8192"),
-        )
-
+        chat_completion = await groq_client.chat.completions.create(messages=groq_messages, model=model_id)
         bot_response = chat_completion.choices[0].message.content
-
-        # -----------------------------------------------------
-        # 2. PARSE AI ACTION TAGS
-        # -----------------------------------------------------
-        clean_response = bot_response
-        actions_taken = []
-
-        # A) REMINDER
-        reminder_match = re.search(r'\[REMINDER:\s*(.*?)\s*\|\s*(.*?)\]', clean_response)
-        if reminder_match:
+        
+        # --- PARSE JSON TOOLS ---
+        json_matches = re.finditer(r'```json\n(.*?)\n```', bot_response, re.DOTALL)
+        for match in json_matches:
             try:
-                dt_str = reminder_match.group(1).strip()
-                msg_str = reminder_match.group(2).strip()
-                rem_time = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
-                rem_time = ist_tz.localize(rem_time) 
+                cmd_data = json.loads(match.group(1))
+                action = cmd_data.get("action")
                 
-                await reminders_col.insert_one({"user_id": user_id, "time": rem_time, "message": msg_str})
-                actions_taken.append(f"⏰ Reminder set for {dt_str}")
-            except Exception as e:
-                print(f"Failed to parse reminder: {e}")
-            clean_response = re.sub(r'\[REMINDER:.*?\]', '', clean_response)
-
-        # B) POLL
-        poll_match = re.search(r'\[POLL:\s*(.*?)\s*\|\s*(.*?)\s*\|\s*(.*?)\]', clean_response)
-        if poll_match:
-            try:
-                question = poll_match.group(1).strip()
-                options = [opt.strip() for opt in poll_match.group(2).split(",")]
-                is_anon = poll_match.group(3).strip().lower() == "true"
+                if action == "set_reminder":
+                    remind_time_str = cmd_data.get("time")
+                    remind_dt = IST.localize(datetime.strptime(remind_time_str, "%Y-%m-%d %H:%M"))
+                    await reminders_col.insert_one({"user_id": user_id, "task": cmd_data.get("task"), "remind_time": remind_dt, "status": "pending"})
+                    bot_response = bot_response.replace(match.group(0), f"\n\n <i>Reminder saved for {remind_time_str}!</i>")
                 
-                await app.send_poll(
-                    chat_id=message.chat.id,
-                    question=question,
-                    options=options[:10],
-                    is_anonymous=is_anon
-                )
-                actions_taken.append("📊 Poll created.")
+                elif action == "finance":
+                    f_type, bank, amount = cmd_data.get("type"), cmd_data.get("bank", "Cash").title(), float(cmd_data.get("amount", 0))
+                    wallet = await wallets_col.find_one({"_id": user_id})
+                    banks = wallet.get("banks", {})
+                    
+                    if f_type == "setup":
+                        banks[bank] = amount
+                        msg_append = f"\n\n <i>{bank} setup with ₹{amount}</i>"
+                    elif f_type == "income":
+                        banks[bank] = banks.get(bank, 0) + amount
+                        msg_append = f"\n\n <i>₹{amount} added to {bank}. New Bal: ₹{banks[bank]}</i>"
+                    elif f_type == "expense":
+                        banks[bank] = banks.get(bank, 0) - amount
+                        msg_append = f"\n\n <i>₹{amount} spent from {bank}. Remaining: ₹{banks[bank]}</i>"
+                    
+                    await wallets_col.update_one({"_id": user_id}, {"$set": {"banks": banks}})
+                    await transactions_col.insert_one({
+                        "user_id": user_id, "type": f_type, "bank": bank, "amount": amount,
+                        "category": cmd_data.get("category", "General"), "note": cmd_data.get("note", ""),
+                        "date": datetime.now(IST)
+                    })
+                    bot_response = bot_response.replace(match.group(0), msg_append)
             except Exception as e:
-                print(f"Failed to create poll: {e}")
-            clean_response = re.sub(r'\[POLL:.*?\]', '', clean_response)
+                print(f"Tool Error: {e}")
 
-        # C) TODO ADD
-        todo_add_match = re.search(r'\[TODO_ADD:\s*(.*?)\]', clean_response)
-        if todo_add_match:
-            task = todo_add_match.group(1).strip()
-            await todos_col.insert_one({"user_id": user_id, "task": task, "status": "pending"})
-            actions_taken.append(f"📝 Added to Todo: {task}")
-            clean_response = re.sub(r'\[TODO_ADD:.*?\]', '', clean_response)
+        # Update Chat History
+        await chats_col.update_one({"_id": active_chat_id}, {"$push": {"history": {"$each": [current_msg, {"role": "assistant", "content": bot_response}]}}})
 
-        # D) TODO DONE
-        todo_done_match = re.search(r'\[TODO_DONE:\s*(.*?)\]', clean_response)
-        if todo_done_match:
-            task = todo_done_match.group(1).strip()
-            await todos_col.update_one({"user_id": user_id, "task": {"$regex": task, "$options": "i"}}, {"$set": {"status": "completed"}})
-            actions_taken.append(f"✅ Marked done: {task}")
-            clean_response = re.sub(r'\[TODO_DONE:.*?\]', '', clean_response)
-
-        action_text = "\n\n".join([f"_{a}_" for a in actions_taken])
-        if action_text:
-            action_text = f"\n\n{action_text}"
-
-        # -----------------------------------------------------
-        # 3. HTML PARSING & SENDING
-        # -----------------------------------------------------
-        final_text = md_to_tg_html(clean_response.strip()) + action_text
-
-        # Update DB History
-        await chats_col.update_one(
-            {"_id": active_chat_id},
-            {"$push": {
-                "history": {
-                    "$each": [
-                        current_msg,
-                        {"role": "assistant", "content": bot_response} 
-                    ]
-                }
-            }}
-        )
-
-        try:
-            await processing_msg.edit_text(final_text, parse_mode=enums.ParseMode.HTML)
-        except Exception:
-            # Fallback if HTML parser fails
-            await processing_msg.edit_text(clean_response.strip() + action_text)
+        # Send HTML Response
+        await processing_msg.edit_text(markdown_to_html(bot_response), parse_mode=pyrogram.enums.ParseMode.HTML)
 
     except Exception as e:
-        await processing_msg.edit_text(f"❌ **Error aagaya bhai:**\n`{str(e)}`")
-
+        await processing_msg.edit_text(f" **Error:**\n`{str(e)}`")
 
 # -------------------------------------------------------------------
-# MongoDB Connection Check
+# Startup & Main Loop
 # -------------------------------------------------------------------
 async def check_mongo_connection():
-    print("🔄 Checking MongoDB Connection...")
     try:
         await db_client.admin.command('ping')
-        print("✅ MongoDB Connected Successfully!")
-        return True
+        print(" MongoDB Connected!")
     except Exception as e:
-        print(f"❌ MongoDB Connection FAILED! Error: {e}")
+        print(f" MongoDB FAILED: {e}")
         sys.exit(1)
 
-# -------------------------------------------------------------------
-# Main entry point
-# -------------------------------------------------------------------
 async def main():
-    print("🚀 Starting Bot, Web Server & Pinger...")
-    
+    print(" Starting Bot Services...")
     await check_mongo_connection()
-    
     await app.start()
-    print("✅ Telegram Bot is Online!")
-
     await send_startup_alert()
 
-    # Start Background Tasks
     asyncio.create_task(ping_other_bot())
     asyncio.create_task(reminder_worker())
-
+    
     server = web.Application()
     server.router.add_get("/", health_check)
     runner = web.AppRunner(server)
     await runner.setup()
-    
     port = int(os.environ.get("PORT", 8000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
-    print(f"🌐 Web Server is running on port {port}!")
-
-    try:
-        await idle()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        print("🛑 Stopping services...")
-        await runner.cleanup()
-        await app.stop()
+    
+    print(f" Bot, Workers & Web Server Running on Port {port}!")
+    await idle()
+    await runner.cleanup()
+    await app.stop()
 
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    try:
-        loop.run_until_complete(main())
-    except KeyboardInterrupt:
-        print("🛑 Bot stopped by user (Ctrl+C).")
+    loop.run_until_complete(main())
