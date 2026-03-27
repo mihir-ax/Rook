@@ -4,8 +4,7 @@ import os
 import sys
 import signal
 import logging
-from pyrogram import Client
-import telebot
+import time
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -20,44 +19,90 @@ logger = logging.getLogger(__name__)
 
 # Global flags for graceful shutdown
 shutdown_flag = False
+rook_bot_task = None
+post_bot_running = True
 
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
-    global shutdown_flag
+    global shutdown_flag, post_bot_running
     logger.info(f"Received signal {signum}, shutting down...")
     shutdown_flag = True
+    post_bot_running = False
 
-def run_rook_bot():
-    """Run the Groq AI bot (Pyrogram)"""
+def run_post_bot():
+    """Run the DetoxByte Publisher Bot (Telebot)"""
+    global post_bot_running
+    
     try:
-        import rook
-        logger.info("✅ Rook bot (Groq AI) started successfully")
-        # The rook bot will run its own event loop
-        # We need to run it in a separate thread since it's async
+        import post
+        logger.info("✅ Post bot (DetoxByte Publisher) started successfully")
+        
+        # Create a new event loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
-        async def start_rook():
-            await rook.main()
+        # Run the bot in a thread-safe way
+        while post_bot_running:
+            try:
+                # Run infinity polling in a non-blocking way
+                import threading
+                polling_thread = threading.Thread(target=post.bot.infinity_polling, args=(True,))
+                polling_thread.daemon = True
+                polling_thread.start()
+                
+                # Keep the thread alive
+                while post_bot_running and polling_thread.is_alive():
+                    time.sleep(1)
+                
+                if post_bot_running and not polling_thread.is_alive():
+                    logger.warning("Post bot polling thread died, restarting...")
+                    time.sleep(5)
+                    
+            except Exception as e:
+                logger.error(f"Post bot error: {e}")
+                if post_bot_running:
+                    time.sleep(10)
+                    
+    except ImportError as e:
+        logger.error(f"Failed to import post module: {e}")
+    except Exception as e:
+        logger.error(f"Post bot critical error: {e}")
+
+async def run_rook_bot_async():
+    """Run the Rook bot asynchronously"""
+    try:
+        import rook
+        logger.info("✅ Rook bot (Groq AI) started successfully")
         
-        loop.run_until_complete(start_rook())
+        # Call the main function from rook
+        await rook.main()
+        
     except ImportError as e:
         logger.error(f"Failed to import rook module: {e}")
     except Exception as e:
         logger.error(f"Rook bot error: {e}")
 
-def run_post_bot():
-    """Run the DetoxByte Publisher Bot (Telebot)"""
+async def main_async():
+    """Main async function to run both bots"""
+    global rook_bot_task
+    
+    # Create task for rook bot
+    rook_bot_task = asyncio.create_task(run_rook_bot_async())
+    
+    # Run post bot in a separate thread
+    post_thread = threading.Thread(target=run_post_bot, name="PostBot")
+    post_thread.daemon = True
+    post_thread.start()
+    
+    logger.info("Both bots are now running...")
+    
     try:
-        import post
-        logger.info("✅ Post bot (DetoxByte Publisher) started successfully")
-        # The post bot uses telebot.infinity_polling() which blocks
-        # So we run it directly in this thread
-        post.bot.infinity_polling(skip_pending=True)
-    except ImportError as e:
-        logger.error(f"Failed to import post module: {e}")
+        # Wait for rook bot task
+        await rook_bot_task
+    except asyncio.CancelledError:
+        logger.info("Rook bot task cancelled")
     except Exception as e:
-        logger.error(f"Post bot error: {e}")
+        logger.error(f"Error in main async: {e}")
 
 def main():
     """Main function to run both bots"""
@@ -91,47 +136,15 @@ def main():
         logger.error("Please check your .env file")
         sys.exit(1)
     
-    # Create threads for both bots
-    rook_thread = threading.Thread(target=run_rook_bot, name="RookBot")
-    post_thread = threading.Thread(target=run_post_bot, name="PostBot")
-    
-    # Start both threads
-    logger.info("Starting Rook Bot thread...")
-    rook_thread.start()
-    
-    # Wait a bit to avoid any port conflicts
-    logger.info("Waiting 3 seconds before starting Post Bot...")
-    import time
-    time.sleep(3)
-    
-    logger.info("Starting Post Bot thread...")
-    post_thread.start()
-    
-    # Keep the main thread alive
+    # Run the main async function
     try:
-        while not shutdown_flag:
-            # Check if threads are still alive
-            if not rook_thread.is_alive():
-                logger.error("⚠️ Rook bot thread died!")
-                if not shutdown_flag:
-                    logger.info("Attempting to restart Rook bot...")
-                    rook_thread = threading.Thread(target=run_rook_bot, name="RookBot")
-                    rook_thread.start()
-            
-            if not post_thread.is_alive():
-                logger.error("⚠️ Post bot thread died!")
-                if not shutdown_flag:
-                    logger.info("Attempting to restart Post bot...")
-                    post_thread = threading.Thread(target=run_post_bot, name="PostBot")
-                    post_thread.start()
-            
-            time.sleep(5)
-            
+        asyncio.run(main_async())
     except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down...")
+        logger.info("Received keyboard interrupt")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
     finally:
-        logger.info("Shutting down bots...")
-        # Let threads finish gracefully
+        logger.info("Shutting down...")
         time.sleep(2)
         logger.info("✅ Shutdown complete")
 
