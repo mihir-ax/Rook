@@ -141,5 +141,9 @@ def process_json(message):
         if chat_id in user_state:
             del user_state[chat_id]
 
-print("🤖 DetoxByte Publisher Bot is running...")
-bot.infinity_polling()
+if __name__ == "__main__":
+    print("🤖 DetoxByte Publisher Bot is running...")
+    bot.infinity_polling()
+else:
+    # When imported as module, don't start polling automatically
+    print("🤖 DetoxByte Publisher Bot module loaded")
