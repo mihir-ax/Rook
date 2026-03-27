@@ -14,8 +14,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global flag for shutdown
+# Global flags
 shutdown_flag = False
+rook_process = None
+post_process = None
 
 def signal_handler(signum, frame):
     """Handle shutdown signals"""
@@ -49,8 +51,8 @@ def run_post_bot_process():
     """Run post bot in separate process"""
     try:
         import post
-        logger.info("Post bot module loaded")
-        # The post bot will run its own polling loop
+        logger.info("Post bot module loaded, starting...")
+        # Call the run function
         post.run_bot()
     except ImportError as e:
         logger.error(f"Failed to import post module: {e}")
@@ -59,9 +61,27 @@ def run_post_bot_process():
         logger.error(f"Post bot process error: {e}")
         sys.exit(1)
 
+def cleanup_processes():
+    """Clean up running processes"""
+    global rook_process, post_process
+    
+    if rook_process and rook_process.is_alive():
+        logger.info("Terminating Rook bot...")
+        rook_process.terminate()
+        rook_process.join(timeout=5)
+        if rook_process.is_alive():
+            rook_process.kill()
+    
+    if post_process and post_process.is_alive():
+        logger.info("Terminating Post bot...")
+        post_process.terminate()
+        post_process.join(timeout=5)
+        if post_process.is_alive():
+            post_process.kill()
+
 def main():
     """Main function to run both bots"""
-    global shutdown_flag
+    global shutdown_flag, rook_process, post_process
     
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
@@ -100,8 +120,8 @@ def main():
     logger.info("Starting Rook bot...")
     rook_process.start()
     
-    # Wait a bit to avoid any port conflicts
-    time.sleep(3)
+    # Wait a bit to avoid any conflicts
+    time.sleep(5)
     
     logger.info("Starting Post bot...")
     post_process.start()
@@ -110,39 +130,30 @@ def main():
     try:
         while not shutdown_flag:
             # Check if processes are still alive
-            if not rook_process.is_alive():
+            if not rook_process.is_alive() and rook_process.exitcode is not None:
                 logger.error("⚠️ Rook bot process died!")
                 if not shutdown_flag:
-                    logger.info("Attempting to restart Rook bot...")
-                    rook_process = multiprocessing.Process(target=run_rook_bot_process, name="RookBot")
-                    rook_process.start()
+                    logger.info("Restarting Rook bot in 10 seconds...")
+                    time.sleep(10)
+                    if not shutdown_flag:
+                        rook_process = multiprocessing.Process(target=run_rook_bot_process, name="RookBot")
+                        rook_process.start()
             
-            if not post_process.is_alive():
+            if not post_process.is_alive() and post_process.exitcode is not None:
                 logger.error("⚠️ Post bot process died!")
                 if not shutdown_flag:
-                    logger.info("Attempting to restart Post bot...")
-                    post_process = multiprocessing.Process(target=run_post_bot_process, name="PostBot")
-                    post_process.start()
+                    logger.info("Restarting Post bot in 5 seconds...")
+                    time.sleep(5)
+                    if not shutdown_flag:
+                        post_process = multiprocessing.Process(target=run_post_bot_process, name="PostBot")
+                        post_process.start()
             
             time.sleep(10)
             
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
     finally:
-        logger.info("Shutting down processes...")
-        rook_process.terminate()
-        post_process.terminate()
-        
-        # Wait for processes to finish
-        rook_process.join(timeout=10)
-        post_process.join(timeout=10)
-        
-        # Force kill if still alive
-        if rook_process.is_alive():
-            rook_process.kill()
-        if post_process.is_alive():
-            post_process.kill()
-        
+        cleanup_processes()
         logger.info("✅ Shutdown complete")
 
 if __name__ == "__main__":
