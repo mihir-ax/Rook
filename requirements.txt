@@ -5,7 +5,7 @@ groq
 python-dotenv
 aiohttp
 pytz
-pytgcalls
+py-tgcalls
 cloudinary
 markdown
 pytelegrambotapi
