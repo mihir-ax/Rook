@@ -6,16 +6,6 @@ import telebot
 import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
-import sys
-import logging
-import time
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
 
 # .env file load karo
 load_dotenv()
@@ -33,7 +23,7 @@ cloudinary.config(
   api_secret = os.getenv("CLOUDINARY_API_SECRET")
 )
 
-# Initialize Bot with simple configuration
+# Initialize Bot
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # Temporary memory to store Cloudinary URL while waiting for JSON
@@ -95,7 +85,6 @@ def process_image(message):
         bot.register_next_step_handler(msg, process_json)
 
     except Exception as e:
-        logger.error(f"Cloudinary upload error: {e}")
         bot.reply_to(message, f"❌ Cloudinary Upload Failed: {str(e)}")
 
 def process_json(message):
@@ -127,16 +116,14 @@ def process_json(message):
             "content": html_content # Pushing raw HTML
         }
 
-        # Send to DetoxByte Backend with timeout
+        # Send to DetoxByte Backend
         headers = {
             "Content-Type": "application/json",
             "x-api-key": BOT_API_KEY
         }
 
         bot.reply_to(message, "🚀 Pushing post to DetoxByte API...")
-        
-        # Use requests with explicit timeout
-        res = requests.post(API_URL, json=payload, headers=headers, timeout=30)
+        res = requests.post(API_URL, json=payload, headers=headers)
 
         if res.status_code == 201:
             post_url = f"https://detoxbyte.xyz/{payload['category']}/{payload['slug']}"
@@ -144,97 +131,15 @@ def process_json(message):
         else:
             bot.reply_to(message, f"❌ **API Error ({res.status_code}):**\n{res.text}", parse_mode="Markdown")
 
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        msg = bot.reply_to(message, f"❌ Invalid JSON format! Error: {str(e)}\n\nPlease check your commas and quotes, and send the JSON again:")
+    except json.JSONDecodeError:
+        msg = bot.reply_to(message, "❌ Invalid JSON format! Please check your commas and quotes, and send the JSON again:")
         bot.register_next_step_handler(msg, process_json)
-    except requests.exceptions.Timeout:
-        logger.error("API request timeout")
-        bot.reply_to(message, "❌ API request timeout! Please try again.")
     except Exception as e:
-        logger.error(f"Critical error: {e}")
         bot.reply_to(message, f"❌ Critical Error: {str(e)}")
     finally:
         # Clean up memory
         if chat_id in user_state:
             del user_state[chat_id]
 
-# ── 4. ERROR HANDLER FOR ALL MESSAGES ──
-@bot.message_handler(func=lambda message: True)
-def echo_all(message):
-    if is_authorized(message):
-        if not message.text.startswith('/'):
-            bot.reply_to(message, "Use /newpost to create a new post!")
-
-# ── 5. MAIN FUNCTION WITH PROPER POLLING ──
-def run_bot():
-    """Run the bot with proper error handling and retry logic"""
-    logger.info("🤖 DetoxByte Publisher Bot is starting...")
-    
-    # Disable unnecessary features that might cause timeout issues
-    try:
-        # Remove webhook if exists
-        bot.remove_webhook()
-    except:
-        pass
-    
-    retry_count = 0
-    max_retries = 10
-    
-    while retry_count < max_retries:
-        try:
-            logger.info(f"Starting polling (attempt {retry_count + 1}/{max_retries})...")
-            
-            # Start polling with proper timeout values
-            bot.infinity_polling(
-                timeout=20,  # Timeout for long polling
-                long_polling_timeout=20,
-                skip_pending=True,
-                allowed_updates=["message", "callback_query"]
-            )
-            
-            # If we get here, polling stopped normally
-            logger.info("Polling stopped normally")
-            break
-            
-        except Exception as e:
-            retry_count += 1
-            logger.error(f"Polling error (attempt {retry_count}/{max_retries}): {e}")
-            
-            if retry_count < max_retries:
-                wait_time = min(30, 5 * retry_count)  # Progressive backoff
-                logger.info(f"Waiting {wait_time} seconds before retry...")
-                time.sleep(wait_time)
-            else:
-                logger.critical("Max retries reached. Bot stopping.")
-                raise
-
-# When imported as module, run in background
-if __name__ == "__main__":
-    run_bot()
-else:
-    # For module import, start in background thread
-    import threading
-    import atexit
-    
-    bot_thread = None
-    
-    def start_bot_background():
-        global bot_thread
-        bot_thread = threading.Thread(target=run_bot, name="PostBotThread", daemon=True)
-        bot_thread.start()
-        logger.info("Post bot started in background thread")
-    
-    def stop_bot():
-        logger.info("Stopping post bot...")
-        # TeleBot doesn't have a clean stop method, but we can try
-        try:
-            bot.stop_polling()
-        except:
-            pass
-    
-    # Register cleanup
-    atexit.register(stop_bot)
-    
-    # Start the bot
-    start_bot_background()
+print("🤖 DetoxByte Publisher Bot is running...")
+bot.infinity_polling()
