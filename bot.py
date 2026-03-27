@@ -1,108 +1,63 @@
-import asyncio
-import threading
+import multiprocessing
 import os
 import sys
-import signal
-import logging
 import time
+import logging
 from dotenv import load_dotenv
+import signal
 
-# Load environment variables
 load_dotenv()
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Global flags for graceful shutdown
+# Global flag for shutdown
 shutdown_flag = False
-rook_bot_task = None
-post_bot_running = True
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully"""
-    global shutdown_flag, post_bot_running
-    logger.info(f"Received signal {signum}, shutting down...")
+    """Handle shutdown signals"""
+    global shutdown_flag
+    logger.info(f"Received signal {signum}, initiating shutdown...")
     shutdown_flag = True
-    post_bot_running = False
 
-def run_post_bot():
-    """Run the DetoxByte Publisher Bot (Telebot)"""
-    global post_bot_running
-    
+def run_rook_bot_process():
+    """Run rook bot in separate process"""
     try:
-        import post
-        logger.info("✅ Post bot (DetoxByte Publisher) started successfully")
-        
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        
-        # Run the bot in a thread-safe way
-        while post_bot_running:
-            try:
-                # Run infinity polling in a non-blocking way
-                import threading
-                polling_thread = threading.Thread(target=post.bot.infinity_polling, args=(True,))
-                polling_thread.daemon = True
-                polling_thread.start()
-                
-                # Keep the thread alive
-                while post_bot_running and polling_thread.is_alive():
-                    time.sleep(1)
-                
-                if post_bot_running and not polling_thread.is_alive():
-                    logger.warning("Post bot polling thread died, restarting...")
-                    time.sleep(5)
-                    
-            except Exception as e:
-                logger.error(f"Post bot error: {e}")
-                if post_bot_running:
-                    time.sleep(10)
-                    
-    except ImportError as e:
-        logger.error(f"Failed to import post module: {e}")
-    except Exception as e:
-        logger.error(f"Post bot critical error: {e}")
-
-async def run_rook_bot_async():
-    """Run the Rook bot asynchronously"""
-    try:
+        import asyncio
         import rook
-        logger.info("✅ Rook bot (Groq AI) started successfully")
         
-        # Call the main function from rook
-        await rook.main()
+        async def run():
+            try:
+                await rook.main()
+            except Exception as e:
+                logger.error(f"Rook bot error in main: {e}")
+                raise
         
+        # Run the async main
+        asyncio.run(run())
     except ImportError as e:
         logger.error(f"Failed to import rook module: {e}")
+        sys.exit(1)
     except Exception as e:
-        logger.error(f"Rook bot error: {e}")
+        logger.error(f"Rook bot process error: {e}")
+        sys.exit(1)
 
-async def main_async():
-    """Main async function to run both bots"""
-    global rook_bot_task
-    
-    # Create task for rook bot
-    rook_bot_task = asyncio.create_task(run_rook_bot_async())
-    
-    # Run post bot in a separate thread
-    post_thread = threading.Thread(target=run_post_bot, name="PostBot")
-    post_thread.daemon = True
-    post_thread.start()
-    
-    logger.info("Both bots are now running...")
-    
+def run_post_bot_process():
+    """Run post bot in separate process"""
     try:
-        # Wait for rook bot task
-        await rook_bot_task
-    except asyncio.CancelledError:
-        logger.info("Rook bot task cancelled")
+        import post
+        logger.info("Post bot module loaded")
+        # The post bot will run its own polling loop
+        post.run_bot()
+    except ImportError as e:
+        logger.error(f"Failed to import post module: {e}")
+        sys.exit(1)
     except Exception as e:
-        logger.error(f"Error in main async: {e}")
+        logger.error(f"Post bot process error: {e}")
+        sys.exit(1)
 
 def main():
     """Main function to run both bots"""
@@ -120,14 +75,12 @@ def main():
     logger.info("=" * 50)
     
     # Check for required environment variables
-    required_vars = [
-        'BOT_TOKEN', 'API_ID', 'API_HASH', 'MONGO_URI', 'ADMIN_ID',
-        'TELEGRAM_BOT_TOKEN', 'ALLOWED_USER_ID', 'BOT_API_KEY',
-        'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'
-    ]
+    required_vars_rook = ['BOT_TOKEN', 'API_ID', 'API_HASH', 'MONGO_URI', 'ADMIN_ID']
+    required_vars_post = ['TELEGRAM_BOT_TOKEN', 'ALLOWED_USER_ID', 'BOT_API_KEY',
+                          'CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET']
     
     missing_vars = []
-    for var in required_vars:
+    for var in required_vars_rook + required_vars_post:
         if not os.getenv(var):
             missing_vars.append(var)
     
@@ -136,16 +89,60 @@ def main():
         logger.error("Please check your .env file")
         sys.exit(1)
     
-    # Run the main async function
+    # Create processes
+    logger.info("Creating Rook bot process...")
+    rook_process = multiprocessing.Process(target=run_rook_bot_process, name="RookBot")
+    
+    logger.info("Creating Post bot process...")
+    post_process = multiprocessing.Process(target=run_post_bot_process, name="PostBot")
+    
+    # Start processes
+    logger.info("Starting Rook bot...")
+    rook_process.start()
+    
+    # Wait a bit to avoid any port conflicts
+    time.sleep(3)
+    
+    logger.info("Starting Post bot...")
+    post_process.start()
+    
+    # Monitor processes
     try:
-        asyncio.run(main_async())
+        while not shutdown_flag:
+            # Check if processes are still alive
+            if not rook_process.is_alive():
+                logger.error("⚠️ Rook bot process died!")
+                if not shutdown_flag:
+                    logger.info("Attempting to restart Rook bot...")
+                    rook_process = multiprocessing.Process(target=run_rook_bot_process, name="RookBot")
+                    rook_process.start()
+            
+            if not post_process.is_alive():
+                logger.error("⚠️ Post bot process died!")
+                if not shutdown_flag:
+                    logger.info("Attempting to restart Post bot...")
+                    post_process = multiprocessing.Process(target=run_post_bot_process, name="PostBot")
+                    post_process.start()
+            
+            time.sleep(10)
+            
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
     finally:
-        logger.info("Shutting down...")
-        time.sleep(2)
+        logger.info("Shutting down processes...")
+        rook_process.terminate()
+        post_process.terminate()
+        
+        # Wait for processes to finish
+        rook_process.join(timeout=10)
+        post_process.join(timeout=10)
+        
+        # Force kill if still alive
+        if rook_process.is_alive():
+            rook_process.kill()
+        if post_process.is_alive():
+            post_process.kill()
+        
         logger.info("✅ Shutdown complete")
 
 if __name__ == "__main__":
