@@ -10,3 +10,4 @@ cloudinary
 markdown
 pytelegrambotapi
 requests
+Pillow
