@@ -5,3 +5,8 @@ groq
 python-dotenv
 aiohttp
 pytz
+pytgcalls
+cloudinary
+markdown
+pytelegrambotapi
+requests
