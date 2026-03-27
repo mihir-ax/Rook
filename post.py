@@ -25,6 +25,9 @@ cloudinary.config(
 )
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+# User state to store data temporarily
+# Structure: { chat_id: { 'coverImage': url, 'json_buffer': "" } }
 user_state = {}
 
 # ── 2. HELPERS ──
@@ -36,14 +39,12 @@ def is_authorized(message):
     return True
 
 def compress_image(image_bytes):
-    """Image ko compress karta hai (approx 30% reduction)"""
+    """Image ko compress karta hai (Quality 70% = 30% reduction approx)"""
     img = Image.open(io.BytesIO(image_bytes))
-    # Convert to RGB if necessary (to save as JPEG)
     if img.mode in ("RGBA", "P"):
         img = img.convert("RGB")
     
     output = io.BytesIO()
-    # Quality 70 matlab 30% compression
     img.save(output, format='JPEG', quality=70, optimize=True)
     return output.getvalue()
 
@@ -52,26 +53,29 @@ def compress_image(image_bytes):
 @bot.message_handler(commands=['start', 'help'])
 def send_welcome(message):
     if is_authorized(message):
-        bot.reply_to(message, "🚀 **DetoxByte Publisher Pro**\n\n"
-                              "1. Direct photo bhejo cover image ke liye.\n"
-                              "2. Uske baad JSON text ya file (.json/.txt) bhejo.\n"
-                              "3. /cancel likho reset karne ke liye.", parse_mode="Markdown")
+        help_text = (
+            "🚀 **DetoxByte Publisher Pro**\n\n"
+            "1️⃣ **Photo Bhejo**: Direct cover image upload karo.\n"
+            "2️⃣ **JSON Bhejo**: Text paste karo ya `.json`/`.txt` file bhejo.\n"
+            "   - Agar content bada hai, to parts mein bhej kar last mein `/done` likho.\n"
+            "3️⃣ **Cancel**: `/cancel` likho reset karne ke liye."
+        )
+        bot.reply_to(message, help_text, parse_mode="Markdown")
 
 @bot.message_handler(commands=['cancel'])
-def cancel(message):
+def cancel_process(message):
     user_state.pop(message.chat.id, None)
-    bot.reply_to(message, "✅ Process cancelled. Nayi image bhejiye.")
+    bot.reply_to(message, "✅ Process reset ho gaya hai. Nayi image bhej sakte hain.")
 
-# Direct image handle karne ke liye (ya /newpost ke baad)
+# --- STEP 1: Handle Image ---
 @bot.message_handler(content_types=['photo'])
 def handle_image(message):
     if not is_authorized(message): return
     
     chat_id = message.chat.id
-    msg = bot.reply_to(message, "⏳ Processing & Compressing image...")
+    msg = bot.reply_to(message, "⏳ Image compress aur upload ho rahi hai...")
 
     try:
-        # Get high res photo
         file_info = bot.get_file(message.photo[-1].file_id)
         downloaded_file = bot.download_file(file_info.file_path)
 
@@ -82,50 +86,69 @@ def handle_image(message):
         upload_result = cloudinary.uploader.upload(compressed_file)
         image_url = upload_result['secure_url']
 
-        user_state[chat_id] = {'coverImage': image_url}
+        # Initializing state for this user
+        user_state[chat_id] = {
+            'coverImage': image_url,
+            'json_buffer': ""
+        }
 
-        help_text = ("✅ **Image Uploaded & Compressed!**\n\n"
-                     "📝 Ab **JSON Payload** bhejo (Text likho ya `.json` / `.txt` file upload karo).")
+        instruction = (
+            "✅ **Image Uploaded!**\n\n"
+            "📝 Ab **JSON Payload** bhejo.\n"
+            "💡 *Note:* Agar JSON bada hai, to use multi-parts mein bhej sakte ho. Jab poora paste ho jaye, tab `/done` likho.\n"
+            "Ya fir direct `.json` file upload karo."
+        )
+        bot.edit_message_text(instruction, chat_id, msg.message_id, parse_mode="Markdown")
         
-        bot.edit_message_text(help_text, chat_id, msg.message_id, parse_mode="Markdown")
-        bot.register_next_step_handler(message, process_json_input)
-
     except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
+        bot.reply_to(message, f"❌ Image Error: {str(e)}")
 
-def process_json_input(message):
+# --- STEP 2: Handle JSON Text (Multi-part) or Files ---
+@bot.message_handler(func=lambda m: m.chat.id in user_state, content_types=['text', 'document'])
+def handle_json_input(message):
     chat_id = message.chat.id
-    
-    if message.text == '/cancel':
-        cancel(message)
+
+    # If it's a command, ignore this handler
+    if message.text and message.text.startswith('/'):
+        if message.text == '/done':
+            process_final_payload(message)
+        elif message.text == '/cancel':
+            cancel_process(message)
         return
 
-    raw_json = ""
+    # Handle Document (File)
+    if message.document:
+        file_name = message.document.file_name.lower()
+        if file_name.endswith(('.json', '.txt')):
+            file_info = bot.get_file(message.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+            user_state[chat_id]['json_buffer'] = downloaded_file.decode('utf-8')
+            bot.reply_to(message, "📄 File received! Processing now...")
+            process_final_payload(message)
+        else:
+            bot.reply_to(message, "❌ Sirf .json ya .txt file bhejien.")
+        return
+
+    # Handle Text (Append to buffer for multi-part messages)
+    if message.text:
+        user_state[chat_id]['json_buffer'] += message.text
+        bot.reply_to(message, "📥 Part received. Aur bhejien ya `/done` likhein.", parse_mode="Markdown")
+
+# --- STEP 3: Final Process & API Call ---
+def process_final_payload(message):
+    chat_id = message.chat.id
+    raw_data = user_state[chat_id]['json_buffer'].strip()
+
+    if not raw_data:
+        bot.reply_to(message, "❌ Buffer khali hai. JSON bhejien pehle.")
+        return
 
     try:
-        # Check if it's a file
-        if message.document:
-            file_name = message.document.file_name.lower()
-            if file_name.endswith(('.json', '.txt')):
-                file_info = bot.get_file(message.document.file_id)
-                downloaded_file = bot.download_file(file_info.file_path)
-                raw_json = downloaded_file.decode('utf-8')
-            else:
-                bot.reply_to(message, "❌ Sirf .json ya .txt file allow hai. Phir se try karein.")
-                bot.register_next_step_handler(message, process_json_input)
-                return
-        elif message.text:
-            raw_json = message.text
-        else:
-            bot.reply_to(message, "❌ Invalid input. Please send JSON text or a file.")
-            bot.register_next_step_handler(message, process_json_input)
-            return
-
-        # Clean JSON string (remove markdown code blocks if present)
-        clean_json = raw_json.replace('```json', '').replace('```', '').strip()
+        # Clean JSON string
+        clean_json = raw_data.replace('```json', '').replace('```', '').strip()
         data = json.loads(clean_json)
 
-        # Markdown conversion
+        # Markdown to HTML
         html_content = markdown.markdown(data.get('content', ''))
 
         payload = {
@@ -138,60 +161,25 @@ def process_json_input(message):
             "content": html_content
         }
 
-        # API Call
         headers = {"Content-Type": "application/json", "x-api-key": BOT_API_KEY}
-        bot.reply_to(message, "🚀 Pushing to DetoxByte...")
+        bot.send_message(chat_id, "🚀 Posting to DetoxByte API...")
         
         res = requests.post(API_URL, json=payload, headers=headers)
 
         if res.status_code in [200, 201]:
             post_url = f"https://detoxbyte.xyz/{payload['category']}/{payload['slug']}"
-            bot.reply_to(message, f"✅ **SUCCESS!**\n\n🔗 [View Post]({post_url})", parse_mode="Markdown")
+            bot.send_message(chat_id, f"✅ **SUCCESS!**\n\n🔗 [Live Link]({post_url})", parse_mode="Markdown", disable_web_page_preview=False)
+            user_state.pop(chat_id, None) # Clear memory after success
         else:
-            bot.reply_to(message, f"❌ **API Error:** {res.text}")
+            bot.send_message(chat_id, f"❌ **API Error ({res.status_code}):**\n{res.text}")
+            # Hum yahan clear nahi kar rahe taaki user JSON theek karke `/done` firse bol sake
 
-    except json.JSONDecodeError:
-        bot.reply_to(message, "❌ JSON format sahi nahi hai. Check karke firse file ya text bhejein:")
-        bot.register_next_step_handler(message, process_json_input)
-    except Exception as e:
-        bot.reply_to(message, f"❌ Error: {str(e)}")
-    finally:
-        # Clear state only on success or critical failure, not on JSON retry
-        if 'res' in locals() and (res.status_code in [200, 201]):
-            user_state.pop(chat_id, None)
-
-print("🤖 DetoxByte Pro Bot is running...")
-bot.infinity_polling()            "category": data.get('category'), # "blog", "news", or "article"
-            "description": data.get('description'),
-            "coverImage": user_state[chat_id]['coverImage'], # Picked from previous step
-            "tags": data.get('tags', []),
-            "content": html_content # Pushing raw HTML
-        }
-
-        # Send to DetoxByte Backend
-        headers = {
-            "Content-Type": "application/json",
-            "x-api-key": BOT_API_KEY
-        }
-
-        bot.reply_to(message, "🚀 Pushing post to DetoxByte API...")
-        res = requests.post(API_URL, json=payload, headers=headers)
-
-        if res.status_code == 201:
-            post_url = f"https://detoxbyte.xyz/{payload['category']}/{payload['slug']}"
-            bot.reply_to(message, f"✅ **SUCCESS! Post Published.**\n\n🔗 Live Link:\n{post_url}", parse_mode="Markdown")
-        else:
-            bot.reply_to(message, f"❌ **API Error ({res.status_code}):**\n{res.text}", parse_mode="Markdown")
-
-    except json.JSONDecodeError:
-        msg = bot.reply_to(message, "❌ Invalid JSON format! Please check your commas and quotes, and send the JSON again:")
-        bot.register_next_step_handler(msg, process_json)
+    except json.JSONDecodeError as e:
+        bot.reply_to(message, f"❌ **Invalid JSON:**\nCheck quotes or commas. Error: {str(e)}\n\n"
+                              "Aap poora JSON firse bhej sakte hain (buffer reset karne ke liye `/cancel` karein).")
     except Exception as e:
         bot.reply_to(message, f"❌ Critical Error: {str(e)}")
-    finally:
-        # Clean up memory
-        if chat_id in user_state:
-            del user_state[chat_id]
 
-print("🤖 DetoxByte Publisher Bot is running...")
+# START BOT
+print("🤖 DetoxByte Multi-Part Publisher Bot is running...")
 bot.infinity_polling()
