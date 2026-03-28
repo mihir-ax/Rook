@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 import markdown
 import telebot
@@ -44,19 +45,36 @@ def compress_image(image_bytes):
     img.save(output, format='JPEG', quality=70, optimize=True)
     return output.getvalue()
 
+# --- AUTO SLUG GENERATOR ---
+def create_slug(title):
+    return re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+
 # --- HANDLERS ---
 
-@bot.message_handler(commands=['start', 'help', 'cancel'])
+@bot.message_handler(commands=['start', 'help', 'cancel', 'noimage'])
 def handle_commands(message):
     if not is_authorized(message): return
     
-    if message.text == '/cancel':
-        user_state.pop(message.chat.id, None)
-        bot.reply_to(message, "🔄 Process Reset! Nayi image bhejiye.")
+    chat_id = message.chat.id
+    cmd = message.text.split()[0]
+
+    if cmd == '/cancel':
+        user_state.pop(chat_id, None)
+        bot.reply_to(message, "🔄 Process Reset! Nayi image, JSON, ya /noimage bhejiye.")
+    
+    elif cmd == '/noimage':
+        user_state[chat_id] = {
+            'coverImage': 'https://res.cloudinary.com/dax71u26t/image/upload/v1774632078/logo_1_mocton.jpg', # 🚀 Default Logo Fallback
+            'json_buffer': ""
+        }
+        bot.reply_to(message, "⏩ Image Skipped (Default logo use hoga).\n\nAb JSON bhejien. Agar pura JSON ek message me aa gaya to automatically publish ho jayega. Bada ho to parts me bhej kar `/done` likhna.")
+    
     else:
         text = ("🚀 **DetoxByte Publisher Pro**\n\n"
                 "1️⃣ **Photo Bhejo**: Direct cover image ke liye.\n"
-                "2️⃣ **JSON Bhejo**: Text paste karo (bada hai to parts mein bhej kar `/done` likho) ya `.json` file bhejo.")
+                "   *(Ya `/noimage` likho skip karne ke liye)*\n"
+                "2️⃣ **JSON Bhejo**: Text paste karo (bada hai to parts mein bhej kar `/done` likho) ya `.json` file bhejo.\n\n"
+                "💡 *Markdown Tables & Auto-slug supported!*")
         bot.reply_to(message, text, parse_mode="Markdown")
 
 @bot.message_handler(content_types=['photo'])
@@ -81,7 +99,7 @@ def handle_photo(message):
             'json_buffer': ""
         }
         
-        bot.edit_message_text("✅ **Image Ready!**\n\nAb JSON bhejien. Agar text bahut bada hai to parts mein bhejien aur aakhri part ke baad `/done` likhien.", chat_id, status.message_id, parse_mode="Markdown")
+        bot.edit_message_text("✅ **Image Ready!**\n\nAb JSON bhejien. Agar pura JSON ek message me aagya to automatic publish ho jayega. Kat gaya to next part bhej kar `/done` likhna.", chat_id, status.message_id, parse_mode="Markdown")
     except Exception as e:
         bot.reply_to(message, f"❌ Photo Error: {str(e)}")
 
@@ -101,7 +119,7 @@ def handle_json_input(message):
             bot.reply_to(message, "❌ Sirf .json ya .txt file bhejien.")
         return
 
-    # Case 2: Multi-part Text
+    # Case 2: Multi-part Text & Smart Detection
     if message.text:
         if message.text == '/done':
             submit_post(message)
@@ -110,7 +128,18 @@ def handle_json_input(message):
             bot.reply_to(message, "Reset done.")
         elif not message.text.startswith('/'):
             user_state[chat_id]['json_buffer'] += message.text
-            bot.reply_to(message, "📥 Added to buffer. Next part bhejien ya `/done` likhien.")
+            
+            # 🚀 SMART JSON DETECTION
+            try:
+                raw_test = user_state[chat_id]['json_buffer'].strip()
+                clean_test = raw_test.replace('```json', '').replace('```', '').strip()
+                json.loads(clean_test) # If this doesn't throw error, JSON is complete!
+                
+                bot.reply_to(message, "✅ Complete JSON detected! Publishing now...")
+                submit_post(message)
+            except json.JSONDecodeError:
+                # Still incomplete, wait for next part
+                bot.reply_to(message, "📥 Added to buffer (JSON is incomplete). Next part bhejien ya `/done` likhien.")
 
 def submit_post(message):
     chat_id = message.chat.id
@@ -125,12 +154,19 @@ def submit_post(message):
         clean_json = raw_json.replace('```json', '').replace('```', '').strip()
         data = json.loads(clean_json)
         
-        # MD to HTML conversion
-        html_body = markdown.markdown(data.get('content', ''))
+        # 🚀 FIX: Markdown to HTML conversion WITH TABLES SUPPORT
+        md_content = data.get('content', '')
+        html_body = markdown.markdown(md_content, extensions=['tables', 'fenced_code', 'nl2br'])
+
+        # 🚀 FIX: Auto-slug if missing
+        title = data.get('title', 'Untitled')
+        slug = data.get('slug')
+        if not slug:
+            slug = create_slug(title)
 
         payload = {
-            "title": data.get('title'),
-            "slug": data.get('slug'),
+            "title": title,
+            "slug": slug,
             "category": data.get('category', 'blog'),
             "description": data.get('description'),
             "coverImage": user_state[chat_id]['coverImage'],
@@ -148,13 +184,15 @@ def submit_post(message):
             bot.send_message(chat_id, f"✅ **SUCCESSFULLY PUBLISHED!**\n\n🔗 [View Article]({final_url})", parse_mode="Markdown")
             user_state.pop(chat_id, None) # Success ke baad memory clear
         else:
-            bot.send_message(chat_id, f"❌ **API Error ({resp.status_code}):**\n{resp.text}")
+            bot.send_message(chat_id, f"❌ **API Error ({resp.status_code}):**\n`{resp.text}`", parse_mode="Markdown")
 
+    except json.JSONDecodeError as e:
+        bot.reply_to(message, f"❌ JSON Syntax Error:\n`{str(e)}`\n\nCheck formatting and try again, or `/cancel`.", parse_mode="Markdown")
     except Exception as e:
-        bot.reply_to(message, f"❌ JSON Error: {str(e)}\n\nCheck format and try again.")
+        bot.reply_to(message, f"❌ Critical Error: {str(e)}")
 
 # --- ANTI-CONFLICT POLLING ---
-print("🤖 DetoxByte Publisher Bot is starting...")
+print("🤖 DetoxByte Publisher Bot is running...")
 
 while True:
     try:
